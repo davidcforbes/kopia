@@ -3,7 +3,6 @@ package index
 import (
 	"crypto/rand"
 	"hash/fnv"
-	"io"
 
 	"github.com/petar/GoLLRB/llrb"
 	"github.com/pkg/errors"
@@ -68,7 +67,13 @@ func (b *OneUseBuilder) shard(maxShardSize int) [][]*Info {
 		item := b.indexStore.DeleteMin()
 
 		h := fnv.New32a()
-		io.WriteString(h, item.(*Info).ContentID.String()) //nolint:errcheck,forcetypeassert
+
+		// 1 prefix byte + up to 2*hashing.MaxHashSize hex chars = 65 bytes for
+		// today's max hash. 128 leaves headroom for a future larger MaxHashSize
+		// without forcing Append to spill to the heap.
+		var buf [128]byte
+
+		h.Write(item.(*Info).ContentID.Append(buf[:0])) //nolint:errcheck,forcetypeassert
 
 		shard := h.Sum32() % uint32(numShards) //nolint:gosec
 
