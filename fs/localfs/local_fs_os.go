@@ -64,10 +64,10 @@ func (it *filesystemDirectoryIterator) Close() {
 	it.dirHandle.Close() //nolint:errcheck
 }
 
-func (fsd *filesystemDirectory) Iterate(_ context.Context) (fs.DirectoryIterator, error) {
+func (fsd *filesystemDirectory) Iterate(ctx context.Context) (fs.DirectoryIterator, error) {
 	fullPath := fsd.fullPath()
 
-	d, err := os.Open(fullPath + trailingSeparator(fsd)) //nolint:gosec
+	d, err := openWithContext(ctx, fullPath+trailingSeparator(fsd))
 	if err != nil {
 		return nil, errors.Wrap(err, "unable to read directory")
 	}
@@ -184,6 +184,7 @@ func entryFromDirEntry(basename string, fi os.FileInfo, prefix string) fs.Entry 
 }
 
 var _ os.FileInfo = (*filesystemEntry)(nil)
+var _ fs.Preflightable = (*filesystemFile)(nil)
 
 func newEntry(basename string, fi os.FileInfo, prefix string) filesystemEntry {
 	return filesystemEntry{

@@ -148,6 +148,96 @@ func testComputeTreeSum(t *testing.T, numWorkers int) {
 	require.Equal(t, 1957, sum)
 }
 
+func TestWorkerRecoversPanic(t *testing.T) {
+	type req struct {
+		shouldPanic bool
+		result      int
+	}
+
+	w := workshare.NewPool[*req](4)
+	defer w.Close()
+
+	var ag workshare.AsyncGroup[*req]
+
+	// Schedule a panicking work item.
+	if ag.CanShareWork(w) {
+		ag.RunAsync(w, func(_ *workshare.Pool[*req], r *req) {
+			if r.shouldPanic {
+				panic("test panic in workshare worker")
+			}
+			r.result = 42
+		}, &req{shouldPanic: true})
+	}
+
+	// Schedule a normal work item — must still complete.
+	if ag.CanShareWork(w) {
+		ag.RunAsync(w, func(_ *workshare.Pool[*req], r *req) {
+			r.result = 99
+		}, &req{})
+	}
+
+	results := ag.Wait()
+
+	// Both work items completed (no deadlock).
+	require.Len(t, results, 2)
+
+	// The panicking item's result is zero (never set).
+	require.Equal(t, 0, results[0].result)
+
+	// The normal item completed successfully.
+	require.Equal(t, 99, results[1].result)
+}
+
+func TestWorkerRecoversPanic_PoolRemainsOperational(t *testing.T) {
+	type req struct {
+		result int
+	}
+
+	w := workshare.NewPool[*req](2)
+	defer w.Close()
+
+	// First batch: all workers panic.
+	var ag1 workshare.AsyncGroup[*req]
+
+	for range 2 {
+		if ag1.CanShareWork(w) {
+			ag1.RunAsync(w, func(_ *workshare.Pool[*req], _ *req) {
+				panic("batch 1 panic")
+			}, &req{})
+		}
+	}
+
+	ag1.Wait()
+
+	// Second batch: normal work — pool must still function after panics.
+	// Track each request explicitly so we can assert results from BOTH the
+	// async-pool path AND the inline fallback path (the latter exercises the
+	// CanShareWork == false branch when the pool is full).
+	var ag2 workshare.AsyncGroup[*req]
+
+	var batch2 []*req
+
+	for range 3 {
+		r := &req{}
+		batch2 = append(batch2, r)
+
+		if ag2.CanShareWork(w) {
+			ag2.RunAsync(w, func(_ *workshare.Pool[*req], r *req) {
+				r.result = 100
+			}, r)
+		} else {
+			// Inline fallback when the pool is full — typical caller pattern.
+			r.result = 100
+		}
+	}
+
+	ag2.Wait()
+
+	for _, r := range batch2 {
+		require.Equal(t, 100, r.result, "every request must complete after panic batch")
+	}
+}
+
 var treeToWalk = buildTree(6)
 
 func BenchmarkComputeTreeSum(b *testing.B) {

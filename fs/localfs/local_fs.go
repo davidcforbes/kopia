@@ -105,13 +105,27 @@ func (f *fileWithMetadata) Entry() (fs.Entry, error) {
 	return newFilesystemFile(newEntry(basename, fi, prefix)), nil
 }
 
-func (fsf *filesystemFile) Open(_ context.Context) (fs.Reader, error) {
-	f, err := os.Open(fsf.fullPath())
+func (fsf *filesystemFile) Open(ctx context.Context) (fs.Reader, error) {
+	f, err := openWithContext(ctx, fsf.fullPath())
 	if err != nil {
 		return nil, errors.Wrap(err, "unable to open local file")
 	}
 
 	return &fileWithMetadata{f}, nil
+}
+
+// Preflight performs a quick accessibility check by opening and immediately
+// closing the file. This catches locked/in-use files before a workshare
+// worker is assigned, avoiding pipeline stalls.
+func (fsf *filesystemFile) Preflight(_ context.Context) error {
+	f, err := os.Open(fsf.fullPath())
+	if err != nil {
+		return err
+	}
+
+	f.Close()
+
+	return nil
 }
 
 func (fsl *filesystemSymlink) Readlink(_ context.Context) (string, error) {
