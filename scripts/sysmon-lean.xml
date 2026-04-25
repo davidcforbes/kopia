@@ -1,0 +1,224 @@
+<!--
+  Sysmon v15 — Lean CISO Workstation Config
+  Forbes Asset Management — Chris Forbes
+  2026-04-15
+  
+  Design principles:
+  - Exclude-heavy: default include, exclude known-noisy sources
+  - Skip high-volume/low-value events (ImageLoad, FileCreate on temp)
+  - Focus on: process creation, network, registry persistence, named pipes
+  - Reduces kernel pool pressure from minifilter context tracking
+-->
+<Sysmon schemaversion="4.90">
+
+  <HashAlgorithms>SHA256</HashAlgorithms>
+
+  <!-- ============================================================ -->
+  <!-- Event ID 1: Process Creation — high value, moderate volume    -->
+  <!-- ============================================================ -->
+  <EventFiltering>
+    <RuleGroup name="ProcessCreate" groupRelation="or">
+      <ProcessCreate onmatch="exclude">
+        <!-- Dev tool noise -->
+        <Image condition="end with">cargo.exe</Image>
+        <Image condition="end with">rustc.exe</Image>
+        <Image condition="end with">rust-analyzer.exe</Image>
+        <Image condition="end with">node.exe</Image>
+        <Image condition="end with">python.exe</Image>
+        <Image condition="end with">git.exe</Image>
+        <Image condition="end with">git-remote-https.exe</Image>
+        <Image condition="end with">conhost.exe</Image>
+        <Image condition="end with">csc.exe</Image>
+        <Image condition="end with">vctip.exe</Image>
+        <!-- MCP server churn -->
+        <Image condition="end with">uv.exe</Image>
+        <Image condition="end with">uvx.exe</Image>
+        <Image condition="contains">mcp-server</Image>
+        <Image condition="contains">awslabs.</Image>
+        <!-- Browser subprocesses -->
+        <Image condition="end with">msedgewebview2.exe</Image>
+        <Image condition="end with">chrome.exe</Image>
+        <Image condition="end with">msedge.exe</Image>
+        <ParentImage condition="end with">msedgewebview2.exe</ParentImage>
+        <!-- Cursor/Electron churn -->
+        <Image condition="end with">comet.exe</Image>
+        <ParentImage condition="end with">comet.exe</ParentImage>
+        <!-- System noise -->
+        <Image condition="end with">SearchFilterHost.exe</Image>
+        <Image condition="end with">SearchProtocolHost.exe</Image>
+        <Image condition="end with">backgroundTaskHost.exe</Image>
+        <Image condition="end with">RuntimeBroker.exe</Image>
+        <Image condition="end with">WmiPrvSE.exe</Image>
+        <Image condition="end with">svchost.exe</Image>
+        <Image condition="end with">dllhost.exe</Image>
+        <Image condition="end with">taskhostw.exe</Image>
+        <Image condition="end with">audiodg.exe</Image>
+        <!-- Bitdefender self-management -->
+        <Image condition="contains">Bitdefender</Image>
+        <Image condition="end with">bdservicehost.exe</Image>
+        <Image condition="end with">bdagent.exe</Image>
+      </ProcessCreate>
+    </RuleGroup>
+
+    <!-- ============================================================ -->
+    <!-- Event ID 3: Network Connection — include only interesting    -->
+    <!-- ============================================================ -->
+    <RuleGroup name="NetworkConnect" groupRelation="or">
+      <NetworkConnect onmatch="exclude">
+        <Image condition="end with">chrome.exe</Image>
+        <Image condition="end with">msedge.exe</Image>
+        <Image condition="end with">msedgewebview2.exe</Image>
+        <Image condition="end with">comet.exe</Image>
+        <Image condition="end with">Discord.exe</Image>
+        <Image condition="end with">Spotify.exe</Image>
+        <Image condition="end with">OneDrive.exe</Image>
+        <Image condition="end with">GoogleDriveFS.exe</Image>
+        <Image condition="end with">Zoom.exe</Image>
+        <Image condition="end with">ms-teams.exe</Image>
+        <Image condition="end with">Perplexity.exe</Image>
+        <Image condition="end with">claude.exe</Image>
+        <Image condition="end with">node.exe</Image>
+        <Image condition="end with">svchost.exe</Image>
+        <Image condition="end with">SearchHost.exe</Image>
+        <Image condition="end with">bdservicehost.exe</Image>
+        <Image condition="end with">MsMpEng.exe</Image>
+        <Image condition="end with">iCloudServices.exe</Image>
+        <Image condition="end with">tailscaled.exe</Image>
+        <DestinationPort condition="is">53</DestinationPort>
+        <DestinationPort condition="is">5353</DestinationPort>
+        <!-- Loopback -->
+        <DestinationIp condition="is">127.0.0.1</DestinationIp>
+        <DestinationIp condition="begin with">169.254.</DestinationIp>
+      </NetworkConnect>
+    </RuleGroup>
+
+    <!-- ============================================================ -->
+    <!-- Event ID 5: Process Terminate — low volume, keep all         -->
+    <!-- ============================================================ -->
+    <RuleGroup name="ProcessTerminate" groupRelation="or">
+      <ProcessTerminate onmatch="exclude">
+        <Image condition="end with">conhost.exe</Image>
+        <Image condition="end with">backgroundTaskHost.exe</Image>
+        <Image condition="end with">RuntimeBroker.exe</Image>
+      </ProcessTerminate>
+    </RuleGroup>
+
+    <!-- ============================================================ -->
+    <!-- Event ID 7: ImageLoad — DISABLED                             -->
+    <!-- Highest volume event. Massive pool pressure from tracking    -->
+    <!-- every DLL load. Not needed on a workstation.                 -->
+    <!-- ============================================================ -->
+    <RuleGroup name="ImageLoad" groupRelation="or">
+      <ImageLoad onmatch="include" />
+    </RuleGroup>
+
+    <!-- ============================================================ -->
+    <!-- Event ID 10: ProcessAccess — DISABLED                        -->
+    <!-- Very high volume, heavy pool usage tracking cross-process    -->
+    <!-- handles. Only useful for detecting credential dumping on     -->
+    <!-- servers. Not needed here.                                    -->
+    <!-- ============================================================ -->
+    <RuleGroup name="ProcessAccess" groupRelation="or">
+      <ProcessAccess onmatch="include" />
+    </RuleGroup>
+
+    <!-- ============================================================ -->
+    <!-- Event ID 11: FileCreate — include only security-relevant     -->
+    <!-- Full FileCreate logging is a major pool consumer.            -->
+    <!-- ============================================================ -->
+    <RuleGroup name="FileCreate" groupRelation="or">
+      <FileCreate onmatch="include">
+        <!-- Startup persistence locations -->
+        <TargetFilename condition="contains">\Start Menu\Programs\Startup\</TargetFilename>
+        <TargetFilename condition="contains">\AppData\Roaming\Microsoft\Windows\Start Menu</TargetFilename>
+        <!-- Scheduled tasks -->
+        <TargetFilename condition="contains">\Windows\System32\Tasks\</TargetFilename>
+        <!-- Executables dropped in user-writable paths -->
+        <TargetFilename condition="end with">.exe</TargetFilename>
+        <TargetFilename condition="end with">.dll</TargetFilename>
+        <TargetFilename condition="end with">.bat</TargetFilename>
+        <TargetFilename condition="end with">.cmd</TargetFilename>
+        <TargetFilename condition="end with">.ps1</TargetFilename>
+        <TargetFilename condition="end with">.vbs</TargetFilename>
+        <TargetFilename condition="end with">.hta</TargetFilename>
+        <TargetFilename condition="end with">.scr</TargetFilename>
+        <TargetFilename condition="end with">.lnk</TargetFilename>
+      </FileCreate>
+    </RuleGroup>
+
+    <!-- ============================================================ -->
+    <!-- Event ID 12,13,14: Registry — persistence keys only          -->
+    <!-- ============================================================ -->
+    <RuleGroup name="RegistryEvent" groupRelation="or">
+      <RegistryEvent onmatch="include">
+        <TargetObject condition="contains">\CurrentVersion\Run</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\RunOnce</TargetObject>
+        <TargetObject condition="contains">\Windows\CurrentVersion\Policies\Explorer\Run</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\Explorer\Shell Folders</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\Explorer\User Shell Folders</TargetObject>
+        <TargetObject condition="contains">\Services\</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\Image File Execution Options\</TargetObject>
+        <TargetObject condition="contains">\Microsoft\Windows NT\CurrentVersion\Winlogon</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\Authentication\Credential Providers</TargetObject>
+        <TargetObject condition="contains">\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall</TargetObject>
+      </RegistryEvent>
+    </RuleGroup>
+
+    <!-- ============================================================ -->
+    <!-- Event ID 15: FileCreateStreamHash — alternate data streams   -->
+    <!-- Low volume, high value. Keep all.                            -->
+    <!-- ============================================================ -->
+
+    <!-- ============================================================ -->
+    <!-- Event ID 17,18: Pipe Created/Connected — keep all            -->
+    <!-- Low volume, good for lateral movement detection.             -->
+    <!-- ============================================================ -->
+
+    <!-- ============================================================ -->
+    <!-- Event ID 22: DNS Query — exclude known-noisy resolvers       -->
+    <!-- ============================================================ -->
+    <RuleGroup name="DnsQuery" groupRelation="or">
+      <DnsQuery onmatch="exclude">
+        <Image condition="end with">chrome.exe</Image>
+        <Image condition="end with">msedge.exe</Image>
+        <Image condition="end with">msedgewebview2.exe</Image>
+        <Image condition="end with">svchost.exe</Image>
+        <Image condition="end with">SearchHost.exe</Image>
+        <Image condition="end with">OneDrive.exe</Image>
+        <Image condition="end with">MsMpEng.exe</Image>
+        <Image condition="end with">bdservicehost.exe</Image>
+        <Image condition="end with">tailscaled.exe</Image>
+        <QueryName condition="end with">.msftconnecttest.com</QueryName>
+        <QueryName condition="end with">.windowsupdate.com</QueryName>
+        <QueryName condition="end with">.microsoft.com</QueryName>
+        <QueryName condition="end with">.office.com</QueryName>
+        <QueryName condition="end with">.office365.com</QueryName>
+        <QueryName condition="end with">.live.com</QueryName>
+        <QueryName condition="end with">.bing.com</QueryName>
+        <QueryName condition="end with">.gstatic.com</QueryName>
+        <QueryName condition="end with">.googleapis.com</QueryName>
+        <QueryName condition="end with">.google.com</QueryName>
+      </DnsQuery>
+    </RuleGroup>
+
+    <!-- ============================================================ -->
+    <!-- Event ID 23: FileDelete — DISABLED                           -->
+    <!-- Archived deletes are extremely storage-heavy.                -->
+    <!-- ============================================================ -->
+    <RuleGroup name="FileDelete" groupRelation="or">
+      <FileDelete onmatch="include" />
+    </RuleGroup>
+
+    <!-- ============================================================ -->
+    <!-- Event ID 26: FileDeleteDetected — log only, no archive       -->
+    <!-- ============================================================ -->
+    <RuleGroup name="FileDeleteDetected" groupRelation="or">
+      <FileDeleteDetected onmatch="include">
+        <TargetFilename condition="end with">.exe</TargetFilename>
+        <TargetFilename condition="end with">.dll</TargetFilename>
+        <TargetFilename condition="end with">.ps1</TargetFilename>
+      </FileDeleteDetected>
+    </RuleGroup>
+
+  </EventFiltering>
+</Sysmon>
