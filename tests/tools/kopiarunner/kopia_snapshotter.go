@@ -390,6 +390,14 @@ func (ks *KopiaSnapshotter) ConnectOrCreateRepoWithServer(serverAddr string, arg
 
 	serverArgs := []string{"--tls-generate-cert", "--tls-cert-file", tlsCertFile, "--tls-key-file", tlsKeyFile}
 
+	// Cover the full retry window of certKeyExist / waitUntilServerStarted
+	// (retryCount × retryInterval = 15 min today) plus a small slack for
+	// command startup. A shorter timeout would silently truncate the retry
+	// loop on slow CI and surface as flaky timeouts that look unrelated to
+	// the actual cause.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(retryCount)*retryInterval+30*time.Second)
+	defer cancel()
+
 	var cmd *exec.Cmd
 
 	var cmdErr error
@@ -398,7 +406,7 @@ func (ks *KopiaSnapshotter) ConnectOrCreateRepoWithServer(serverAddr string, arg
 		return nil, "", errors.Wrap(cmdErr, "CreateServer failed")
 	}
 
-	if err := certKeyExist(context.TODO(), tlsCertFile, tlsKeyFile); err != nil {
+	if err := certKeyExist(ctx, tlsCertFile, tlsKeyFile); err != nil {
 		if buf, ok := cmd.Stderr.(*bytes.Buffer); ok {
 			// If the STDERR buffer does not contain any obvious error output,
 			// it is possible the async server creation above is taking a long time
@@ -418,7 +426,7 @@ func (ks *KopiaSnapshotter) ConnectOrCreateRepoWithServer(serverAddr string, arg
 	}
 
 	serverAddr = fmt.Sprintf("https://%v", serverAddr)
-	if err := ks.waitUntilServerStarted(context.TODO(), serverAddr, fingerprint); err != nil {
+	if err := ks.waitUntilServerStarted(ctx, serverAddr, fingerprint); err != nil {
 		return cmd, "", err
 	}
 
