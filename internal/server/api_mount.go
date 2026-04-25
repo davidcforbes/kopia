@@ -3,10 +3,14 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"time"
 
+	"github.com/kopia/kopia/internal/mount"
 	"github.com/kopia/kopia/internal/serverapi"
 	"github.com/kopia/kopia/repo/object"
 )
+
+const mountUnmountTimeout = 30 * time.Second
 
 func handleMountCreate(ctx context.Context, rc requestContext) (any, *apiError) {
 	req := &serverapi.MountSnapshotRequest{}
@@ -68,13 +72,29 @@ func handleMountDelete(ctx context.Context, rc requestContext) (any, *apiError) 
 		return nil, notFoundError("mount point not found")
 	}
 
-	if err := c.Unmount(ctx); err != nil {
-		return nil, internalServerError(err)
+	if unmountErr := rc.srv.unmountAndDeleteMount(ctx, oid, c); unmountErr != nil {
+		return nil, internalServerError(unmountErr)
 	}
 
-	rc.srv.deleteMount(oid)
-
 	return &serverapi.Empty{}, nil
+}
+
+// unmountAndDeleteMount calls Unmount on the controller and unconditionally
+// removes the mount from s.mounts, even if Unmount fails. A failed unmount
+// would otherwise leave a dead controller in the map and block future mounts
+// for the same OID until server restart.
+//
+// The unmount uses context.WithoutCancel(ctx) so request-scoped values
+// (auth/logging/tracing) survive but the unmount can't be aborted by the
+// HTTP request's cancellation/timeout.
+func (s *Server) unmountAndDeleteMount(ctx context.Context, oid object.ID, c mount.Controller) error {
+	unmountCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mountUnmountTimeout)
+	defer cancel()
+
+	unmountErr := c.Unmount(unmountCtx)
+	s.deleteMount(oid)
+
+	return unmountErr
 }
 
 func handleMountList(_ context.Context, rc requestContext) (any, *apiError) {
