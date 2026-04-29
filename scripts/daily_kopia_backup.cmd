@@ -68,19 +68,11 @@ if exist "%INDEXER%" (
     echo %DATE% %TIME% — WARNING: indexer not found at %INDEXER%, skipping >> "%LOG%"
 )
 
-REM Check for errors — only in THIS run's section, not the full log
-REM Excludes: "Ignored error", snapshot list lines with "errors:", "0 errors",
-REM           workshare stall warnings, and prior WARNING lines
-set ALERT_FILE=C:\dev\kopia\logs\BACKUP_ERRORS.flag
-for /f %%N in ('powershell.exe -NoProfile -Command "$lines = Get-Content ''%LOG%''; $startIdx = ($lines.Count - 1); for ($i = $lines.Count - 1; $i -ge 0; $i--) { if ($lines[$i] -match ''Daily Kopia backup start'') { $startIdx = $i; break } }; $run = $lines[$startIdx..($lines.Count-1)] -join [char]10; ($run -split [char]10 | Where-Object { $_ -match ''error'' } | Where-Object { $_ -notmatch ''Ignored error|errors.:|possible stall|WARNING:|0 errors'' }).Count"') do set ERR_COUNT=%%N
-if "%ERR_COUNT%"=="" set ERR_COUNT=0
-if %ERR_COUNT% GTR 0 (
-    echo %DATE% %TIME% — WARNING: %ERR_COUNT% unexpected errors detected >> "%LOG%"
-    echo %DATE% %TIME% — %ERR_COUNT% unexpected errors. Run kopia_errors.cmd for details. > "%ALERT_FILE%"
-) else (
-    if exist "%ALERT_FILE%" del "%ALERT_FILE%"
-    echo %DATE% %TIME% — No errors detected >> "%LOG%"
-)
+REM Post a Windows toast immediately, summarizing this run from the
+REM structured "snapshot summary ..." lines kopia emits per source.
+REM The script also writes/clears BACKUP_ERRORS.flag based on errors=N.
+echo %DATE% %TIME% — Posting backup summary toast >> "%LOG%"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\dev\kopia\scripts\post_summary_toast.ps1 -LogFile "%LOG%" >> "%LOG%" 2>&1
 
 echo %DATE% %TIME% — Daily Kopia backup complete >> "%LOG%"
 echo ======================================== >> "%LOG%"
