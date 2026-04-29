@@ -357,7 +357,9 @@ func (c *commandSnapshotCreate) snapshotSingleSource(
 		return errors.Wrap(finalErr, "cannot save manifest")
 	}
 
-	if _, finalErr = policy.ApplyRetentionPolicy(ctx, rep, sourceInfo, true); finalErr != nil {
+	deletedIDs, retentionErr := policy.ApplyRetentionPolicy(ctx, rep, sourceInfo, true)
+	if retentionErr != nil {
+		finalErr = retentionErr
 		return errors.Wrap(finalErr, "unable to apply retention policy")
 	}
 
@@ -375,10 +377,10 @@ func (c *commandSnapshotCreate) snapshotSingleSource(
 
 	c.svc.getProgress().Finish()
 
-	return c.reportSnapshotStatus(ctx, manifest)
+	return c.reportSnapshotStatus(ctx, manifest, len(deletedIDs))
 }
 
-func (c *commandSnapshotCreate) reportSnapshotStatus(ctx context.Context, manifest *snapshot.Manifest) error {
+func (c *commandSnapshotCreate) reportSnapshotStatus(ctx context.Context, manifest *snapshot.Manifest, retentionDeleted int) error {
 	var maybePartial string
 	if manifest.IncompleteReason != "" {
 		maybePartial = " partial"
@@ -393,6 +395,11 @@ func (c *commandSnapshotCreate) reportSnapshotStatus(ctx context.Context, manife
 	} else {
 		log(ctx).Infof("Created%v snapshot with root %v and ID %v in %v", maybePartial, manifest.RootObjectID(), snapID, manifest.EndTime.Sub(manifest.StartTime).Truncate(time.Second))
 	}
+
+	// Structured summary line — always emitted, easy to grep without jq.
+	// JSON consumers already get the same data via manifest.Stats and
+	// manifest.RootEntry.DirSummary, so this line goes only to the logger.
+	log(ctx).Info(snapshot.NewSummary(manifest, retentionDeleted).LogString())
 
 	if ds := manifest.RootEntry.DirSummary; ds != nil {
 		if ds.IgnoredErrorCount > 0 {
