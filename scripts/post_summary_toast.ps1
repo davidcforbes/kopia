@@ -1,4 +1,4 @@
-# post_summary_toast.ps1 — Post a Windows toast right after a backup run.
+# post_summary_toast.ps1 - Post a Windows toast right after a backup run.
 #
 # Reads the most recent "Daily Kopia backup start" section of the log,
 # pulls out every "snapshot summary ..." line emitted by `kopia snapshot
@@ -10,7 +10,7 @@
 # so the toast appears within seconds of the backup finishing instead of
 # 5 hours later via a separate health-check task.
 #
-# Designed for PowerShell 5.1 (powershell.exe) — uses WinRT toast APIs.
+# Designed for PowerShell 5.1 (powershell.exe) - uses WinRT toast APIs.
 
 param(
     [string]$LogFile     = 'C:\dev\kopia\logs\daily_kopia.log',
@@ -60,7 +60,7 @@ function Show-Toast {
 # Accepts both bare values (foo=bar) and quoted values (foo="bar baz"). The
 # inner-content regex skips over backslash-escaped chars so an embedded \"
 # does not terminate the value, but we keep the escapes verbatim in the
-# returned string — they read fine in a toast and avoid a fragile unescape
+# returned string - they read fine in a toast and avoid a fragile unescape
 # step that previously stripped backslashes from Windows paths.
 function Parse-SummaryLine {
     param([Parameter(Mandatory)] [string]$Line)
@@ -102,9 +102,14 @@ if ($startIdx -lt 0) {
     exit 2
 }
 
-# Pull timestamp from the start line for the toast body.
+# Pull timestamp from the start line for the toast body. The marker uses
+# either an em-dash (legacy log format) or an ASCII hyphen as the separator;
+# build the pattern from a char literal so the source file stays ASCII-safe
+# under PowerShell 5.1's default codepage.
 $startLine = $lines[$startIdx]
-$runWhen = if ($startLine -match '^(.+?)\s+—\s+Daily Kopia backup start') { $matches[1].Trim() } else { '?' }
+$emDash = [char]0x2014
+$markerPattern = "^(.+?)\s+($emDash|-)\s+Daily Kopia backup start"
+$runWhen = if ($startLine -match $markerPattern) { $matches[1].Trim() } else { '?' }
 
 # Find every structured "snapshot summary" line in this run.
 $runLines = $lines[$startIdx..($lines.Count - 1)]
