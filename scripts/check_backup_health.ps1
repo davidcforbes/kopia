@@ -1,19 +1,23 @@
-# check_backup_health.ps1 — Verify last daily Kopia backup run, post toast.
+# check_backup_health.ps1 - Belt-and-suspenders watchdog: confirm that a
+# kopia "snapshot summary" line was written to daily_kopia.log in the last
+# 24h. Posts a WARN toast if not.
 #
-# Reads the most recent "Daily Kopia backup start" section of the log and
-# evaluates six health checks targeting the fixes deployed 2026-04-25
-# (DPAPI password loader, VSS policy, VHDX mount-letter fallback). Posts a
-# Windows toast notification with PASS/FAIL summary and writes a flag file
-# on FAIL so other tooling can pick it up.
+# This used to be the *primary* PASS/FAIL channel: a separate 08:00 task
+# that grep-parsed daily_kopia.log for the six failure modes deployed
+# 2026-04-25 (DPAPI/VSS/VHDX/etc). Those checks were brittle and ran 5h
+# after the backup. Today the primary toast is posted *inline* by
+# daily_kopia_backup.cmd via post_summary_toast.ps1; this script remains
+# only to catch the case where the daily task didn't run at all (machine
+# off, task disabled, scheduler glitch).
 #
-# Designed for PowerShell 5.1 (powershell.exe) — uses WinRT toast APIs which
-# are not available in PowerShell 7 (pwsh.exe).
+# Designed for PowerShell 5.1 (powershell.exe) - uses WinRT toast APIs.
 
 param(
     [string]$LogFile      = 'C:\dev\kopia\logs\daily_kopia.log',
     [string]$FlagFile     = 'C:\dev\kopia\logs\BACKUP_HEALTH_FAIL.flag',
     [string]$AppId        = 'KopiaBackup.HealthCheck',
-    [string]$LaunchProto  = 'kopiamonitor:open'
+    [string]$LaunchProto  = 'kopiamonitor:open',
+    [int]   $StaleHours   = 24
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,10 +32,7 @@ function Show-Toast {
     [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]
     [void][Windows.Data.Xml.Dom.XmlDocument,                  Windows.Data.Xml.Dom,        ContentType=WindowsRuntime]
 
-    # Use ToastGeneric so we can set launch=... activationType=protocol on
-    # the root <toast> element AND add an explicit "Open" action button.
-    # Encode XML-special chars in body/title.
-    $enc = { param($s) [System.Security.SecurityElement]::Escape($s) }
+    $enc    = { param($s) [System.Security.SecurityElement]::Escape($s) }
     $titleX = & $enc $Title
     $bodyX  = & $enc $Body
     $launch = & $enc $LaunchProto
@@ -57,50 +58,34 @@ function Show-Toast {
 }
 
 if (-not (Test-Path -LiteralPath $LogFile)) {
-    Show-Toast -Title 'Kopia Backup: UNKNOWN' -Body "Log not found: $LogFile" -AppId $AppId -LaunchProto $LaunchProto
+    Show-Toast -Title 'Kopia Backup: NO LOG' -Body "Log not found: $LogFile - daily task has never run on this host." -AppId $AppId -LaunchProto $LaunchProto
     "$(Get-Date -Format s) | Log not found: $LogFile" | Set-Content -LiteralPath $FlagFile
-    exit 2
-}
-
-$lines = Get-Content -LiteralPath $LogFile
-$startIdx = -1
-for ($i = $lines.Count - 1; $i -ge 0; $i--) {
-    if ($lines[$i] -match 'Daily Kopia backup start') { $startIdx = $i; break }
-}
-if ($startIdx -lt 0) {
-    Show-Toast -Title 'Kopia Backup: UNKNOWN' -Body 'No "Daily Kopia backup start" marker in log.' -AppId $AppId -LaunchProto $LaunchProto
-    "$(Get-Date -Format s) | No start marker in log" | Set-Content -LiteralPath $FlagFile
-    exit 2
-}
-$run = $lines[$startIdx..($lines.Count - 1)] -join "`n"
-
-# Pull the timestamp from the start line for the toast body.
-$startLine = $lines[$startIdx]
-$runWhen = if ($startLine -match '^(.+?)\s+—\s+Daily Kopia backup start') { $matches[1].Trim() } else { '?' }
-
-# Per-fix checks (targeting the four issues fixed 2026-04-25).
-$vssShadowCount = ([regex]::Matches($run, 'creating volume shadow copy of')).Count
-$checks = [ordered]@{
-    'DPAPI password load (no handle-invalid)' = -not ($run -match 'password prompt error: The handle is invalid')
-    'No FATAL repo status'                    = -not ($run -match 'FATAL: repo status failed')
-    'VSS not blocked by UAC'                  = -not ($run -match 'do not have Administrators group privileges')
-    'VSS shadow copy created on both sources' = ($vssShadowCount -ge 2)
-    'VHDX indexer mounted (no drive-letter)'  = -not ($run -match 'Mount-DiskImage reported no drive letters')
-    'Run completed cleanly'                   = ($run -match 'errors=0' -or $run -match 'No errors detected')
-}
-
-$failed = @()
-foreach ($k in $checks.Keys) { if (-not $checks[$k]) { $failed += $k } }
-
-if ($failed.Count -eq 0) {
-    if (Test-Path -LiteralPath $FlagFile) { Remove-Item -LiteralPath $FlagFile -Force }
-    Show-Toast -Title "Kopia Backup: PASS ($runWhen)" `
-               -Body  "All $($checks.Count) health checks passed." `
-               -AppId $AppId -LaunchProto $LaunchProto
-    exit 0
-} else {
-    $body = "Failed $($failed.Count)/$($checks.Count): " + ($failed -join '; ')
-    Show-Toast -Title "Kopia Backup: FAIL ($runWhen)" -Body $body -AppId $AppId -LaunchProto $LaunchProto
-    "$(Get-Date -Format s) | $body" | Set-Content -LiteralPath $FlagFile
     exit 1
 }
+
+$summaryFound = Select-String -LiteralPath $LogFile -Pattern '^snapshot summary\s+source=' -Quiet
+if (-not $summaryFound) {
+    Show-Toast -Title 'Kopia Backup: WATCHDOG' `
+               -Body  "No 'snapshot summary' line ever found in $LogFile. Either the daily task is broken or kopia.exe lacks the structured-summary patch." `
+               -AppId $AppId -LaunchProto $LaunchProto
+    "$(Get-Date -Format s) | No snapshot summary line ever found" | Set-Content -LiteralPath $FlagFile
+    exit 1
+}
+
+$mtime = (Get-Item -LiteralPath $LogFile).LastWriteTime
+$age   = (Get-Date) - $mtime
+if ($age.TotalHours -gt $StaleHours) {
+    $ageH = [int][Math]::Round($age.TotalHours)
+    Show-Toast -Title 'Kopia Backup: WATCHDOG' `
+               -Body  "daily_kopia.log untouched for $ageH h (threshold $StaleHours h). Daily task may have skipped a run." `
+               -AppId $AppId -LaunchProto $LaunchProto
+    "$(Get-Date -Format s) | daily_kopia.log stale ($ageH h)" | Set-Content -LiteralPath $FlagFile
+    exit 1
+}
+
+# Healthy: file was touched recently and contains at least one snapshot
+# summary line. The inline toast posted by post_summary_toast.ps1 already
+# announced PASS/FAIL of the actual run; this watchdog stays silent on
+# success to avoid duplicate notifications.
+if (Test-Path -LiteralPath $FlagFile) { Remove-Item -LiteralPath $FlagFile -Force }
+exit 0
