@@ -1,106 +1,67 @@
-# check_backup_health.ps1 — Parse the latest daily_kopia backup run and emit a
-# Windows toast notification (PASS/FAIL) under the KopiaBackup.HealthCheck AUMID.
+# verify_helpers_preflight.ps1 — Rich Authenticode validation for the daily
+# backup preflight. For each signed target (kopia.exe + every .ps1 helper),
+# verifies:
+#   1. Status = Valid           (chain trust + integrity)
+#   2. Subject CN matches       (catches signature substitution)
+#   3. Timestamp present        (sig survives signer-cert expiry)
+#   4. Sig not too stale        (catches sign pipeline drift)
 #
-# Scheduled daily at 08:00 by \Backup\KopiaBackupHealthCheck.
+# Exit 0 → ok to run the backup. Exit 1 → preflight FATAL.
 [CmdletBinding()]
 param(
-    [string]$LogFile = 'C:\dev\kopia\logs\daily_kopia.log',
-    [string]$Aumid   = 'KopiaBackup.HealthCheck',
-    # Treat the run as stale (FAIL) if newer than this many hours hasn't completed.
-    [int]$StaleHours = 30
+    [string]   $ScriptsDir          = 'C:\dev\kopia\scripts',
+    [string]   $KopiaBin            = 'C:\Users\david\go\bin\kopia.exe',
+    [string]   $ExpectedSubjectLike = '*Forbes Asset Management*',
+    [int]      $StaleDays           = 30
 )
 
 $ErrorActionPreference = 'Stop'
 
-if (-not (Test-Path $LogFile)) {
-    $title  = 'Kopia Backup: NO LOG'
-    $body   = "Log file missing: $LogFile"
-    $status = 'FAIL'
-} else {
-    $lines = Get-Content -Path $LogFile
+$targets = @(
+    $KopiaBin,
+    (Join-Path $ScriptsDir 'repo_status_check.ps1'),
+    (Join-Path $ScriptsDir 'check_backup_errors.ps1'),
+    (Join-Path $ScriptsDir 'check_backup_health.ps1'),
+    (Join-Path $ScriptsDir 'verify_helpers_preflight.ps1')
+)
 
-    $startIdx = -1
-    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
-        if ($lines[$i] -match 'Daily Kopia backup start') { $startIdx = $i; break }
+$problems = @()
+foreach ($t in $targets) {
+    $name = Split-Path $t -Leaf
+    if (-not (Test-Path $t)) { $problems += "$name : missing"; continue }
+
+    $s = Get-AuthenticodeSignature $t
+    if ($s.Status -ne 'Valid') {
+        $problems += "$name : Status=$($s.Status) ($($s.StatusMessage))"; continue
     }
-
-    if ($startIdx -lt 0) {
-        $status = 'FAIL'; $title = 'Kopia Backup: NO RUN FOUND'; $body = 'No "Daily Kopia backup start" line in log.'
-    } else {
-        $run = $lines[$startIdx..($lines.Count - 1)]
-        # Pull the timestamp from the start line (format: "Mon MM/DD/YYYY  HH:MM:SS.ff — Daily Kopia backup start")
-        $startTime = $null
-        if ($run[0] -match '^[A-Za-z]{3}\s+(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})') {
-            $startTime = [datetime]::ParseExact("$($Matches[1]) $($Matches[2])", 'MM/dd/yyyy HH:mm:ss', $null)
-        }
-
-        $exitLine     = ($run | Where-Object { $_ -match 'Exit codes: repo=' } | Select-Object -Last 1)
-        $completeLine = ($run | Where-Object { $_ -match 'Daily Kopia backup complete' } | Select-Object -Last 1)
-        $fatalLine    = ($run | Where-Object { $_ -match 'FATAL:' } | Select-Object -First 1)
-
-        if ($fatalLine) {
-            $status = 'FAIL'
-            $title  = 'Kopia Backup: FAIL'
-            $body   = ($fatalLine -replace '^[A-Za-z]{3}\s+\S+\s+\S+\s+—\s+', '').Trim()
-        }
-        elseif (-not $completeLine) {
-            $age = if ($startTime) { [int]((Get-Date) - $startTime).TotalHours } else { 999 }
-            if ($age -ge $StaleHours) {
-                $status = 'FAIL'; $title = 'Kopia Backup: STALE'
-                $body   = "Last run started $age h ago, never completed."
-            } else {
-                $status = 'PENDING'; $title = 'Kopia Backup: RUNNING'
-                $body   = "Run from $startTime is still in progress."
-            }
-        }
-        else {
-            # Parse "Exit codes: repo=N snap1=N snap2=N maint=N errors=N"
-            $rc = @{}
-            if ($exitLine -match 'repo=(\d+)\s+snap1=(\d+)\s+snap2=(\d+)\s+maint=(\d+)\s+errors=(\d+)') {
-                $rc.repo=[int]$Matches[1]; $rc.snap1=[int]$Matches[2]; $rc.snap2=[int]$Matches[3]
-                $rc.maint=[int]$Matches[4]; $rc.errors=[int]$Matches[5]
-            }
-            $bad = ($rc.Values | Where-Object { $_ -ne 0 } | Measure-Object).Count
-            if ($bad -eq 0) {
-                $status = 'PASS'; $title = 'Kopia Backup: PASS'
-                $body   = "Completed $startTime  (all stages rc=0, 0 errors)"
-            } else {
-                $status = 'FAIL'; $title = 'Kopia Backup: FAIL'
-                $body   = "Completed $startTime  (repo=$($rc.repo) snap1=$($rc.snap1) snap2=$($rc.snap2) maint=$($rc.maint) errors=$($rc.errors))"
-            }
-        }
+    if ($s.SignerCertificate.Subject -notlike $ExpectedSubjectLike) {
+        $problems += "$name : unexpected publisher: $($s.SignerCertificate.Subject)"; continue
+    }
+    if (-not $s.TimeStamperCertificate) {
+        $problems += "$name : no RFC3161 timestamp (sig will break when cert expires)"; continue
+    }
+    # Use the signer cert's NotBefore as the signing-time anchor (Trusted
+    # Signing certs are minted right before each sign call).
+    $signedAt = $s.SignerCertificate.NotBefore
+    $age      = ((Get-Date) - $signedAt).TotalDays
+    if ($age -gt $StaleDays) {
+        $problems += "$name : signed $([int]$age)d ago (>$StaleDays); sign pipeline may be stuck"
     }
 }
 
-# Emit toast via the registered AUMID. Uses the WinRT XML APIs directly; no
-# external module dependency (BurntToast, etc).
-$null = [Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]
-$null = [Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom.XmlDocument,ContentType=WindowsRuntime]
+if ($problems.Count -gt 0) {
+    foreach ($p in $problems) { Write-Host $p }
+    exit 1
+}
 
-$xml = @"
-<toast>
-  <visual>
-    <binding template='ToastGeneric'>
-      <text>$([System.Security.SecurityElement]::Escape($title))</text>
-      <text>$([System.Security.SecurityElement]::Escape($body))</text>
-    </binding>
-  </visual>
-</toast>
-"@
+Write-Host "OK: $($targets.Count) signed targets verified (Forbes Asset Management, fresh)"
+exit 0
 
-$doc = New-Object Windows.Data.Xml.Dom.XmlDocument
-$doc.LoadXml($xml)
-$toast    = [Windows.UI.Notifications.ToastNotification]::new($doc)
-$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($Aumid)
-$notifier.Show($toast)
-
-Write-Host "$status — $title — $body"
-if ($status -eq 'FAIL') { exit 1 } else { exit 0 }
 # SIG # Begin signature block
 # MII9bgYJKoZIhvcNAQcCoII9XzCCPVsCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCB+JgCbFqIhY7U6
-# fZZYWX8wTtP/ZR8j3QOUmeC/xlSoqqCCIjAwggXMMIIDtKADAgECAhBUmNLR1FsZ
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDHcRBBjoaaz0i4
+# H13RTBSGnInfBK6XBvgO48TOwjJtqKCCIjAwggXMMIIDtKADAgECAhBUmNLR1FsZ
 # lUgTecgRwIeZMA0GCSqGSIb3DQEBDAUAMHcxCzAJBgNVBAYTAlVTMR4wHAYDVQQK
 # ExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xSDBGBgNVBAMTP01pY3Jvc29mdCBJZGVu
 # dGl0eSBWZXJpZmljYXRpb24gUm9vdCBDZXJ0aWZpY2F0ZSBBdXRob3JpdHkgMjAy
@@ -287,20 +248,20 @@ if ($status -eq 'FAIL') { exit 1 } else { exit 0 }
 # cmF0aW9uMSswKQYDVQQDEyJNaWNyb3NvZnQgSUQgVmVyaWZpZWQgQ1MgRU9DIENB
 # IDA0AhMzAACN+P8L8+6cI/IqAAAAAI34MA0GCWCGSAFlAwQCAQUAoF4wEAYKKwYB
 # BAGCNwIBDDECMAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwLwYJKoZIhvcN
-# AQkEMSIEICa9ZLyrHEw/0LLnKgvtrPMLf/dOXPBd5fvcV2kIifjyMA0GCSqGSIb3
-# DQEBAQUABIIBgKRHlElsBMt3nLHcMGGiL6hy49Pzy5IAbUj8SJCoexGR5n55NOKO
-# QuDWIHRy6uriESbKJO/GIAqOLroJKOMooQrgUSUR7tWZ8Ks6ss7NrEhpEsvp0QYR
-# CBOHRFFxSJAGTb4lSRgFc8Cg/HThcmYMY8ODMv0E4I1HTk0R7dAxOXBURseOYHo2
-# 2L1j4ynfuQyKNT2ZD5KOrsapTlRqcVHAgAvd9nZ6a+Nvpc2pGRNxZoQw8oYxp7ep
-# 4comUx1DaCihK2Qfv6ibzyHtlpC0VylcB9Jj3fkkjXTzeblNN5XLofrkJ7olHT66
-# AZkXXQ5i/0WU4udcSynQCj18iEfpwsLB8GPGVYoM23ODLuaaX2tn0dn5ZzEK8/8c
-# 8Ak8eQlSDAaN2h6zzi1gYp0QRiiDdqANWnknAByOF7hCI7HmJDG8pDAoldyTHCNY
-# sM/cnGblK3ORcW1IpirhNL6O51UnhOLSbPYzjk6OVfnu5ASLZxoLsz9Ga4cWHdrI
-# 84SqO+f+IxloVKGCGBQwghgQBgorBgEEAYI3AwMBMYIYADCCF/wGCSqGSIb3DQEH
+# AQkEMSIEIAE7wkJgGwA1UBvYocR64zYELNVhbF/Nyjr+yWk0zSIQMA0GCSqGSIb3
+# DQEBAQUABIIBgEVvhxptwxzuSQkv0O6HQ3YeXODBAYhR+/GVa76QAxSlhxb+l6zj
+# 4OsOjx2fFlx6U9aeZAsif1yiRlPOxtjXKw74PO5tDo3IbWGZ09iizUssQju4AHsS
+# pUwQsYa+b1ip2/aCdYcLbqxqjyjnv9u9+D1Y6D4t2oqz5apJILu5leFomTQCt+Qv
+# 75c4Hfu4aowyVbVlA5BWbjf1owtx+sR4P3FB9tSuaiSTIIn0qpqC60916HMgsgsg
+# hb5ExH6gtF1F4kBUCXZf75Z5sFsKxSAKVJnIv1bxys3JUoGDL+RuC/c75LSc6PHW
+# 2zJh8Vcc6LofTEaT2uzcx91OozNSnu11zfWGAfsZfcT6BNy2K8vmpwdAnP92dc59
+# a2BDOBMQShsDbJTB85Ket25truGBc5aS1nV+bOT0JJyUnRlmmOu7O7DdQjeKemYz
+# VsHhvfDhMXggc4FCeGpxkRkpzF3dwflxBTeU9kUIwFDvhOdNMsyzQMWcG8ShZ3qs
+# 1sx/7ye06O4+f6GCGBQwghgQBgorBgEEAYI3AwMBMYIYADCCF/wGCSqGSIb3DQEH
 # AqCCF+0wghfpAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFiBgsqhkiG9w0BCRABBKCC
-# AVEEggFNMIIBSQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCDJIaTq
-# +TG/NeHYZwQz8O6Le8ID1KooRpPObFiU9ovpdAIGaeddcoCCGBMyMDI2MDQyODAz
-# MTEwNC43NzNaMASAAgH0oIHhpIHeMIHbMQswCQYDVQQGEwJVUzETMBEGA1UECBMK
+# AVEEggFNMIIBSQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCDvbm7O
+# ZJL+WCnoKLJ4qMJrcO5/lGDX/8iLzxTJvXtJ3gIGaeddcoCHGBMyMDI2MDQyODAz
+# MTEwOC40OTZaMASAAgH0oIHhpIHeMIHbMQswCQYDVQQGEwJVUzETMBEGA1UECBMK
 # V2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0
 # IENvcnBvcmF0aW9uMSUwIwYDVQQLExxNaWNyb3NvZnQgQW1lcmljYSBPcGVyYXRp
 # b25zMScwJQYDVQQLEx5uU2hpZWxkIFRTUyBFU046QTUwMC0wNUUwLUQ5NDcxNTAz
@@ -390,8 +351,8 @@ if ($status -eq 'FAIL') { exit 1 } else { exit 0 }
 # dGlvbjEyMDAGA1UEAxMpTWljcm9zb2Z0IFB1YmxpYyBSU0EgVGltZXN0YW1waW5n
 # IENBIDIwMjACEzMAAABWfo+dWAiO6WAAAAAAAFYwDQYJYIZIAWUDBAIBBQCgggSf
 # MBEGCyqGSIb3DQEJEAIPMQIFADAaBgkqhkiG9w0BCQMxDQYLKoZIhvcNAQkQAQQw
-# HAYJKoZIhvcNAQkFMQ8XDTI2MDQyODAzMTEwNFowLwYJKoZIhvcNAQkEMSIEIBFR
-# 7j8JSLLeGFQA7mEtnoIShNvyWZ9h6T5XO2ZXXSrSMIG5BgsqhkiG9w0BCRACLzGB
+# HAYJKoZIhvcNAQkFMQ8XDTI2MDQyODAzMTEwOFowLwYJKoZIhvcNAQkEMSIEILbZ
+# c3Er2ifHQKEcEk/l6NXiDfTPP/XVrbgCbndIR4t1MIG5BgsqhkiG9w0BCRACLzGB
 # qTCBpjCBozCBoAQgtgwzJU2k4/CVd4k4OV56XuAkh+tNeN2fl/aOTQYDDKgwfDBl
 # pGMwYTELMAkGA1UEBhMCVVMxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlv
 # bjEyMDAGA1UEAxMpTWljcm9zb2Z0IFB1YmxpYyBSU0EgVGltZXN0YW1waW5nIENB
@@ -414,15 +375,15 @@ if ($status -eq 'FAIL') { exit 1 } else { exit 0 }
 # 0WxE2dmbJn8SkFpg79aFr58kyEoVHuEBGNnVjEz8QMhfoLQfU5MocSYstRsI4sa1
 # Jdtp7dPgbNR8bhJPBLe58Sne7fLFfBkZ2mxVZzPlxkwbC2hfg/w7ev0Dh59aguCR
 # GELjmu2XC0kxYHd3u249STNpzPHq0cMpx6vwyBooKTANBgkqhkiG9w0BAQEFAASC
-# AgBNcyRvaWyltxa4YDnswgjPydVlqlPwrzHKXS4DMSX1fkilLR/F3biR5usYSoKR
-# /i7R5tmfczFXBsezXyMNTXEy/YdIPp2bs0KwLWLHII2kGSbg4vLHgMWLWc0RDx//
-# LN+nqeZQKAjKLAvINwSRz+sN+OB/QrEvy6wnEc7wxWfUAdfl2UEBXFQfFWun2OD2
-# fnWs++vA/xTc/SfIOhwu7Zjg4/Dm9RhCzJzt9Hqau9Xbo4Uk6DMsugIQY1HtOslX
-# MRlsg8RMWxcdk7maqRikoVQoP23oJ4ViDrraeRoMDtZ0xsQBkoiy2wAjDETzYrFK
-# lKXrP8MiOu+CfAyzkiBXYjQeJCHyjy5NOcnm7PW62kEPmI27EbeLpqKgyCydw2sQ
-# CnL6M9uW5Q21dOwDlrImIJgAsWFsiXCSw3Gvkc58XIUrsDE2ABEbGGpX2rcms6Nw
-# 4XQmv1iT/Unh9LAuknSmkgiHwo2ov2XjGnMyI2Hy/PwcPQ8+kTvANxCRZ8pM5x2A
-# tXWr6z4uTYJIrtMidWJLKyj45ZTwLBBZ2yCzsK0EnPdyPgnG/5BRrpgJBVQVik59
-# uhzBG/qkRuaUwyxLbztuosqwxea94Q2iNIvw1bO2OlKzn4mqljPUVdp29Y731S1y
-# VkZNCWL4OVGHpfYcdm0W21mHVznpG0LFGisYYmPBBWax/A==
+# AgAkj9gKwsW1/H+IYOXmu+QdlexPdZ6Y+7Uylbh9lsKjeb9jbRtCA+IZYACdA5gN
+# DRZLgI3QHvScYb42g/Fu/1m2Ya5aw8zvgqZ45a+Xzjq8m4V9mVIHjgyH9F0pLvfH
+# +kazBGvDrRQAmTW5F8H930MGib8pp3Ey/YzJN+9CAGhAizFJUmmsembMald76JKU
+# +CzFpr7FZCYETFXICTppboVHCPO6UnJMCsngSflnpfJCXttxOOcOrwzeaDoINGZy
+# K/2mAasE/vIaLZA3gQb0Nm2rLQuzhpu/ky7CrfFRbpaohAVD0P5VeSeSfsaR8fo3
+# K5gqbAjqIEi+/WSLcZuo0o2+Hz23gLmSSemSUi+1cdut6FYnD7VHV6CdVAPonvfM
+# JQA2lInN+29sQPp4NarxPtyzSjOQZy14AKs9kFkzrh7zNd+6kTr8veTZ8+fddsiw
+# DiB2BRomtzfNLs4rSROvV6fBIeRJw9rptw1l7+YeyTvhaj7wU52G0D7Jwml+rrKw
+# MWyVucSNUOpbUWO7C+3CbdpEB3TaHI9/KKbr+Eppjrrw+2NfEl/Bqnch1FrUDf8U
+# 8LB+61t/N0JYb7rd+1jnZlPk2xMY6hJsZuC2tLlx1TEy8ql3PEeO/G1dvYoGF0Vj
+# 2FXk025KOsenclo3J+G4pbOl6tua4CTWom+6bNGxKHDZtw==
 # SIG # End signature block
