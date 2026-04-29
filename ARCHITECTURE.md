@@ -86,32 +86,29 @@ winner.
 5. The 08:00 watchdog and 08:30 wbadmin checks are independent toasts
    on the same `KopiaBackup.HealthCheck` AppId.
 
-## The v1 / v2 hazard
+## Secrets layout (post-consolidation 2026-04-29)
 
-`scripts/` is gitignored on `master` (`.git/info/exclude` line `/scripts/`).
-Personal scripts evolve **on disk** without showing in `git status`.
-The branch `personal/automation` tracks them via `git add -f`, but it
-**will silently lag** if the user edits on disk and forgets to commit.
+`scripts/` is tracked normally on master. The `personal/automation`
+branch was retired and merged in. The actual secret —
+`scripts/.kopia-pw.dat`, a DPAPI LocalMachine-encrypted kopia repo
+password — is protected by three orthogonal layers:
 
-This bit us on 2026-04-29: `personal/automation` carried v1 stubs of
-`daily_kopia_backup.cmd` (80 lines), `check_backup_errors.ps1` (17),
-`check_backup_health.ps1` (91), `repo_status_check.ps1` (60). On disk
-were v2 versions at 190, 348, 428, 368 lines respectively. Deploying
-the branch overwrote v2 with v1; recovery required restoring from a
-kopia snapshot.
+1. **`scripts/.gitignore`** (committed, shared) ignores
+   `.kopia-pw.dat` and `BACKUP_*.flag`. The inner gate.
+2. **`.git/info/exclude`** (per-host, never committed) carries a
+   defensive secret-pattern safety net (`*.pw`, `*.pw.dat`, `*.pem`,
+   `*.key`, `*.token`, `*-credentials.{json,yaml}`,
+   `secrets.{json,yaml}`, `.env`, `.env.*`). Catches mistakes the
+   inner gitignore might miss.
+3. **DPAPI LocalMachine encryption + restrictive ACLs** on the file
+   itself. Machine-bound: even a leak elsewhere would be useless.
 
-**Before deploying scripts/ from the branch** to `C:\dev\kopia\scripts\`,
-run `scripts/check_branch_drift.ps1` (or the equivalent diff command
-below) and resolve any drift first. If the on-disk version is newer,
-sync on-disk → branch and commit before deploying.
-
-```powershell
-# Quick drift check
-git diff --no-index `
-    "C:\dev\kopia-automation\scripts" `
-    "C:\dev\kopia\scripts" |
-  Select-String '^diff --git'
-```
+The historical "v1/v2 hazard" — where on-disk scripts evolved
+silently while `personal/automation` lagged — went away with the
+consolidation. `git status` now surfaces drift on the first edit.
+The companion `check_branch_drift.ps1` was retired in the same
+change. Recreate steps for a fresh machine live in
+[`SECRETS.md`](SECRETS.md).
 
 ## Cross-project dependencies
 

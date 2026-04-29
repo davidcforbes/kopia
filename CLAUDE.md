@@ -51,22 +51,28 @@ and was read but not followed.
 
 Binds to `superpowers:brainstorming`.
 
-### The v1 / v2 script hazard
+### Secrets and gitignore layout
 
-`scripts/` is gitignored on master (`.git/info/exclude` line
-`/scripts/`). On-disk evolution does not show in `git status` and can
-quietly diverge from the `personal/automation` branch.
+`scripts/` is now tracked normally on master (the
+`personal/automation` branch was retired 2026-04-29 and merged
+in). The actual secret — `scripts/.kopia-pw.dat`, the DPAPI
+LocalMachine-encrypted kopia repo password — is protected by three
+orthogonal layers:
 
-**Before deploying scripts from `personal/automation` to
-`C:\dev\kopia\scripts\`**, check for drift:
+1. `scripts/.gitignore` ignores `.kopia-pw.dat` and `BACKUP_*.flag`
+   (the inner gate, committed and shared with anyone who clones
+   this fork).
+2. `.git/info/exclude` carries a defensive secret-pattern safety net
+   (`*.pw`, `*.pw.dat`, `*.pem`, `*.key`, `*.token`,
+   `*-credentials.{json,yaml}`, `secrets.{json,yaml}`, `.env`,
+   `.env.*`). Per-host, never committed; catches mistakes the inner
+   gitignore might miss.
+3. DPAPI LocalMachine encryption + restrictive ACLs on the file
+   itself. Even a leak elsewhere would be useless: only this
+   machine can decrypt.
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File C:\dev\kopia\scripts\check_branch_drift.ps1
-```
-
-If on-disk is newer (it usually is), sync on-disk → branch and commit
-before deploying. Do not let `cp -rv` overwrite v2 with v1 again.
+The recreate procedure for a fresh machine lives in
+[`SECRETS.md`](SECRETS.md) and `scripts/README.md`.
 
 ---
 

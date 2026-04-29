@@ -1,8 +1,9 @@
 # Personal backup automation scripts
 
 Local Windows automation around this Kopia fork — **not for upstream**.
-Lives only on the `personal/automation` branch in the fork. Never merged
-to `master` or any `fix/*` PR branch.
+Tracked on `master` of the fork at `davidcforbes/kopia` since
+2026-04-29 (previously isolated on a `personal/automation` branch
+that was retired). Push to `fork` only; never propose upstream.
 
 ## Layout
 
@@ -94,13 +95,19 @@ sitting in `logs/` after a fixed incident makes downstream tooling think
 the host is unhealthy. Delete stale flags after resolving an incident; the
 toast scripts will recreate them next time a real failure occurs.
 
-## Branch hygiene
+## Push hygiene
 
-This branch lives only on `fork/personal/automation`. To pull updates from
-upstream master without polluting this branch:
+These scripts live on `master` of the fork (`davidcforbes/kopia`). Push
+only to that remote; **never** to `origin/kopia` (upstream). The fork's
+master diverged from upstream long ago and carries this Windows-specific
+automation that has no place in the open-source repo.
 
 ```bash
-git fetch origin
-git rebase origin/master
-git push fork personal/automation --force-with-lease
+git push fork master                  # this is the canonical destination
+git fetch origin                      # to pull upstream changes
+git merge origin/master               # standard merge from upstream when desired
 ```
+
+If you ever want to upstream a kopia bug fix, cherry-pick the specific
+commits onto a clean branch off `origin/master` rather than pushing
+this fork's master.
