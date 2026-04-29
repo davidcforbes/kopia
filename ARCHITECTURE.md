@@ -1,0 +1,129 @@
+# Backup Stack Architecture
+
+> Authoritative inventory for the kopia + wbadmin + backup-monitor stack
+> running on this Windows host. Read this **before** answering questions
+> about backup state or designing new tooling in this orbit. The
+> companion file `CLAUDE.md` enforces two hard rules that depend on this
+> doc.
+
+## Why this doc exists
+
+Two failure modes are documented in `personal/automation:scripts/README.md`'s
+"Failure modes" section:
+
+1. Sampling one log file and answering "no errors" while a different
+   authoritative source disagreed.
+2. Designing new tooling without first auditing the existing components.
+
+Both happened because the surfaces below were not catalogued in one
+place. They are now.
+
+## Components
+
+| Binary                 | Path                                                      | Role                                                                     |
+|------------------------|-----------------------------------------------------------|--------------------------------------------------------------------------|
+| `kopia.exe`            | `C:\Users\david\go\bin\kopia.exe`                         | Snapshot/restore engine. Built from this fork (`go install ./...`).      |
+| `backup-monitor.exe`   | `C:\dev\backup-monitor\target\release\backup-monitor.exe` | Direct2D GUI dashboard. Parses logs and renders status cards live.       |
+| `backup-dump.exe`      | `C:\dev\backup-monitor\target\release\backup-dump.exe`    | Console version of the same scoring engine. **Use this from agents.**    |
+| `backup-indexer.exe`   | `C:\dev\backup-monitor\target\release\backup-indexer.exe` | Builds gzipped JSONL search indexes; runs nightly inside the wrapper.    |
+
+`backup-monitor`'s parsing covers `C:\dev\kopia\logs\daily_kopia.log`
+plus the `Microsoft-Windows-Backup` event log. It produces a single
+PASS/FAIL/STATUS-CARDS verdict per run and a paginated history.
+
+## Authoritative source by question
+
+When a question is asked about backup state, read from the row that
+matches. Do not improvise.
+
+| Question                                            | Authoritative source                                                                                              |
+|-----------------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
+| Did last night's backup pass?                       | `backup-dump.exe` STATUS CARDS (Kopia + wbadmin) and run #1 row.                                                  |
+| What was the kopia exit code on a given night?      | `C:\dev\kopia\logs\daily_kopia.log` `Exit codes:` line for that run.                                              |
+| Which files errored inside a snapshot?              | The matching `C:\Users\david\AppData\Local\kopia\cli-logs\kopia-*-snapshot-create.0.log`.                         |
+| Did wbadmin run last night?                         | `wbadmin get versions` newest entry, plus `Microsoft-Windows-Backup` event log via `Get-WinEvent`.                |
+| Was the daily wrapper invoked at all?               | `C:\dev\kopia\logs\daily_kopia.log` mtime + the `Daily Kopia backup start` marker.                                |
+| Are there outstanding flagged failures?             | `C:\dev\kopia\logs\BACKUP_ERRORS.flag` and `BACKUP_HEALTH_FAIL.flag` and `WBADMIN_HEALTH_FAIL.flag`.               |
+| Toast click target / how to open the dashboard?     | `kopiamonitor:` URL protocol, registered HKCU, points at `backup-monitor.exe` (see `register_backup_monitor_toast.ps1`). |
+
+When two of these disagree, **report the disagreement**. Do not pick a
+winner.
+
+## Log surfaces
+
+| Path                                                       | Writer                              | Contents                                                                                          |
+|------------------------------------------------------------|-------------------------------------|---------------------------------------------------------------------------------------------------|
+| `C:\Users\david\AppData\Local\kopia\cli-logs\*.log`        | `kopia.exe` itself                  | One file per CLI invocation. DEBUG-level. Multi-megabyte. Sampling one is **not** representative. |
+| `C:\dev\kopia\logs\daily_kopia.log`                        | `daily_kopia_backup.cmd` (v2)       | Wrapper-aggregated. One run per nightly fire. Has `Exit codes:` and per-step `[snapshot]` lines.  |
+| Event log: `Microsoft-Windows-Backup`                      | wbadmin / wbengine                  | Critical/Error events around wbadmin runs. Read via `Get-WinEvent`.                               |
+| `C:\dev\kopia\logs\BACKUP_ERRORS.flag`                     | `daily_kopia_backup.cmd` v2         | Touched when `check_backup_errors.ps1` reports `errors > 0`. Removed on PASS.                     |
+| `C:\dev\kopia\logs\BACKUP_HEALTH_FAIL.flag`                | `check_backup_health.ps1`           | Touched when watchdog detects a missed run / no summary line.                                     |
+| `C:\dev\kopia\logs\WBADMIN_HEALTH_FAIL.flag`               | `check_wbadmin_health.ps1`          | Touched when wbadmin freshness exceeds threshold or a failure event is found.                    |
+
+## Scheduled tasks (under `\Backup\`)
+
+| Task name                  | Schedule        | Action                                                                                                  |
+|----------------------------|-----------------|---------------------------------------------------------------------------------------------------------|
+| `DailyKopiaSnapshotV2`     | Daily 03:00     | Runs `C:\dev\kopia\scripts\daily_kopia_backup.cmd` (v2 wrapper, RunLevel Highest, S4U logon).           |
+| `KopiaBackupHealthCheck`   | Daily 08:00     | Runs `check_backup_health.ps1` (watchdog: did the daily run write a `snapshot summary` line?).          |
+| `WbadminHealthCheck`       | Daily 08:30     | Runs `check_wbadmin_health.ps1` (wbadmin freshness via `wbadmin get versions` + Backup event log).      |
+| `WeeklyBackupVerify`       | Weekly Sat 04:00| Runs `verify_backups.cmd` (`kopia snapshot verify` + content sample + full maintenance).                |
+| `WeeklySystemImage`        | Weekly Mon 02:00| Runs `weekly_system_image.cmd`. **Currently broken**: script missing, last run rc=1. Tracked in beads.  |
+
+## Notification chain
+
+1. `daily_kopia_backup.cmd` writes the structured `snapshot summary
+   source=... errors=N ...` line per source (added in master commit
+   `1f5c6604` on `feat/snapshot-summary-line`).
+2. After the last snapshot, the wrapper invokes
+   `post_summary_toast.ps1` which parses the line and posts a single
+   PASS/FAIL Windows toast.
+3. The toast's launch target and the `Open` action both use the
+   `kopiamonitor:` URL protocol, registered HKCU by
+   `register_backup_monitor_toast.ps1`.
+4. The handler resolves to `backup-monitor.exe`, which loads the live
+   dashboard.
+5. The 08:00 watchdog and 08:30 wbadmin checks are independent toasts
+   on the same `KopiaBackup.HealthCheck` AppId.
+
+## The v1 / v2 hazard
+
+`scripts/` is gitignored on `master` (`.git/info/exclude` line `/scripts/`).
+Personal scripts evolve **on disk** without showing in `git status`.
+The branch `personal/automation` tracks them via `git add -f`, but it
+**will silently lag** if the user edits on disk and forgets to commit.
+
+This bit us on 2026-04-29: `personal/automation` carried v1 stubs of
+`daily_kopia_backup.cmd` (80 lines), `check_backup_errors.ps1` (17),
+`check_backup_health.ps1` (91), `repo_status_check.ps1` (60). On disk
+were v2 versions at 190, 348, 428, 368 lines respectively. Deploying
+the branch overwrote v2 with v1; recovery required restoring from a
+kopia snapshot.
+
+**Before deploying scripts/ from the branch** to `C:\dev\kopia\scripts\`,
+run `scripts/check_branch_drift.ps1` (or the equivalent diff command
+below) and resolve any drift first. If the on-disk version is newer,
+sync on-disk → branch and commit before deploying.
+
+```powershell
+# Quick drift check
+git diff --no-index `
+    "C:\dev\kopia-automation\scripts" `
+    "C:\dev\kopia\scripts" |
+  Select-String '^diff --git'
+```
+
+## Cross-project dependencies
+
+`backup-monitor` depends on a sibling crate `d2d-ui` at
+`C:\dev\Rust-DeskApp\crates\d2d-ui` (its README says so). When working
+on backup-monitor, that sibling is part of the build graph; touching
+its API can break this app.
+
+## When to update this doc
+
+- Any new binary or task added to the chain.
+- Any new log surface or flag file.
+- Any change to where the authoritative source for a question lives.
+- Any change to the v1/v2 reality once `scripts/` is fully tracked or
+  the gitignore is removed.
