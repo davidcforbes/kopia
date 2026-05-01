@@ -63,24 +63,24 @@ try {
     & icacls $dpapiFile /inheritance:r /grant:r "SYSTEM:(R)" "Administrators:(R)" *> $null
     Write-Host "OK: DPAPI file updated ($((Get-Item $dpapiFile).Length) bytes, ACL re-locked)."
 
-    # Step 4: rewrite KOPIA_PASSWORD line in daily_kopia_backup.cmd, preserving UTF-8 (no BOM)
+    # Step 4: rewrite any literal `set "KOPIA_PASSWORD=..."` line in
+    # daily_kopia_backup.cmd. As of 2026-05-01 the wrapper relies entirely
+    # on kopia's persisted creds (no env var), so this is a best-effort
+    # legacy hook: if the pattern is present we update it, otherwise we
+    # skip silently. This used to throw, which made step 3's success
+    # invisible in the script's exit code.
     $pwEsc = $pw -replace '%', '%%'
     $newLine = "set `"KOPIA_PASSWORD=$pwEsc`""
-
-    # Read explicitly as UTF-8 to avoid Windows PS 5.1's default ANSI decoding,
-    # which round-trips non-ASCII chars (em-dashes etc.) through Windows-1252
-    # and double-encodes them when written back as UTF-8.
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     $cmdContent = [IO.File]::ReadAllText($cmdPath, $utf8NoBom)
     $pattern = '(?m)^set "KOPIA_PASSWORD=[^"]*"'
-    if ($cmdContent -notmatch $pattern) {
-        throw "Could not find existing KOPIA_PASSWORD line in $cmdPath."
+    if ($cmdContent -match $pattern) {
+        $cmdContent = [regex]::Replace($cmdContent, $pattern, { param($m) $newLine })
+        [IO.File]::WriteAllText($cmdPath, $cmdContent, $utf8NoBom)
+        Write-Host "OK: daily_kopia_backup.cmd updated."
+    } else {
+        Write-Host "Skipped: daily_kopia_backup.cmd has no literal KOPIA_PASSWORD line (uses persisted creds)."
     }
-    # Use a MatchEvaluator so $newLine is treated as a literal (no $-substitutions)
-    $cmdContent = [regex]::Replace($cmdContent, $pattern, { param($m) $newLine })
-
-    [IO.File]::WriteAllText($cmdPath, $cmdContent, $utf8NoBom)
-    Write-Host "OK: daily_kopia_backup.cmd updated."
 
     Write-Host ""
     Write-Host "DONE. Next: fire the V2 task to confirm end-to-end."

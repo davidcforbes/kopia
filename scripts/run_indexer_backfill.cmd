@@ -8,7 +8,14 @@ REM  Must run ELEVATED so the wbadmin VHDX mount succeeds.
 REM ============================================================
 setlocal
 
-set KOPIA_PASSWORD=[REDACTED-LEAKED-PW-2026-04]
+REM Decrypt repo password from DPAPI-protected file (LocalMachine scope) into env.
+REM Mirrors verify_backups.cmd:17 — never bake the literal into a tracked file.
+for /f "usebackq delims=" %%P in (`powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\dev\kopia\scripts\get_kopia_password.ps1`) do set KOPIA_PASSWORD=%%P
+if "%KOPIA_PASSWORD%"=="" (
+    echo FATAL: failed to decrypt KOPIA_PASSWORD from .kopia-pw.dat
+    exit /b 2
+)
+
 set INDEXER=C:\dev\backup-monitor\target\release\backup-indexer.exe
 
 if not exist "%INDEXER%" (
