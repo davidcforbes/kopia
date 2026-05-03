@@ -161,6 +161,33 @@ echo %DATE% %TIME% — [maintenance] starting >> "%LOG%"
 set MAINT_RC=!errorlevel!
 echo %DATE% %TIME% — [maintenance] finished ^(rc=!MAINT_RC!^) >> "%LOG%"
 
+REM ---- Index newly-created snapshots so backup-monitor's Find & Restore
+REM      page sees today's (latest-1) snapshot. Failures here are NON-fatal:
+REM      a stale search index is not a backup failure and must not flip
+REM      OVERALL_RC. wbengine.exe was already drained in preflight, so the
+REM      wbadmin VHDX target on D: is safe to read.
+set INDEXER=C:\dev\backup-monitor\target\release\backup-indexer.exe
+set INDEX_DIR=D:\BackupMonitorIndex
+if exist "!INDEXER!" (
+    echo %DATE% %TIME% — [indexer] kopia incremental starting >> "%LOG%"
+    "!INDEXER!" --kopia --index-dir=!INDEX_DIR! >> "%LOG%" 2>&1
+    set IDX_K_RC=!errorlevel!
+    echo %DATE% %TIME% — [indexer] kopia finished ^(rc=!IDX_K_RC!^) >> "%LOG%"
+    if !IDX_K_RC! NEQ 0 echo %DATE% %TIME% — WARNING: kopia indexer rc=!IDX_K_RC! ^(search may be stale^) >> "%LOG%"
+
+    echo %DATE% %TIME% — [indexer] wbadmin incremental starting >> "%LOG%"
+    "!INDEXER!" --wbadmin --index-dir=!INDEX_DIR! >> "%LOG%" 2>&1
+    set IDX_W_RC=!errorlevel!
+    echo %DATE% %TIME% — [indexer] wbadmin finished ^(rc=!IDX_W_RC!^) >> "%LOG%"
+    if !IDX_W_RC! NEQ 0 echo %DATE% %TIME% — WARNING: wbadmin indexer rc=!IDX_W_RC! ^(search may be stale^) >> "%LOG%"
+
+    echo %DATE% %TIME% — [indexer] prune starting >> "%LOG%"
+    "!INDEXER!" --prune --index-dir=!INDEX_DIR! >> "%LOG%" 2>&1
+    echo %DATE% %TIME% — [indexer] prune finished ^(rc=!errorlevel!^) >> "%LOG%"
+) else (
+    echo %DATE% %TIME% — WARNING: indexer not found at !INDEXER! ^(search will be stale^) >> "%LOG%"
+)
+
 REM ---- Snapshot list and stats ----
 echo %DATE% %TIME% — Snapshot list: >> "%LOG%"
 "%KOPIA_BIN%" %KOPIA_CFG% snapshot list --all >> "%LOG%" 2>&1

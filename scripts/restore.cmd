@@ -15,6 +15,7 @@ if /i "%1"=="list" goto :LIST
 if /i "%1"=="mount" goto :MOUNT
 if /i "%1"=="restore" goto :RESTORE
 if /i "%1"=="unmount" goto :UNMOUNT
+if /i "%1"=="wbadmin" goto :WBADMIN
 goto :USAGE
 
 :LIST
@@ -62,23 +63,39 @@ echo Restoring snapshot %SNAP_ID% to %TARGET% %FLAGS% ...
 echo Done. Files restored to %TARGET%.
 goto :EOF
 
+:WBADMIN
+if "%2"=="" (
+    echo Usage: restore.cmd wbadmin ^<file-path^> [output-dir]
+    echo   Pulls a single file from the most recent wbadmin system image VHDX.
+    echo   Requires an elevated prompt.
+    echo   Example: restore.cmd wbadmin "C:\dev\EUC\.pencil\EUC.pen"
+    goto :EOF
+)
+set WB_FILE=%~2
+set WB_OUT=%~3
+set PS_ARGS=-NoProfile -ExecutionPolicy Bypass -File "%~dp0restore_wbadmin_file.ps1" -FilePath "%WB_FILE%"
+if not "%WB_OUT%"=="" set PS_ARGS=%PS_ARGS% -OutputDir "%WB_OUT%"
+powershell.exe %PS_ARGS%
+goto :EOF
+
 :USAGE
 echo.
 echo Kopia Restore Helper
 echo ====================
 echo.
 echo Commands:
-echo   restore.cmd list                              List all snapshots
-echo   restore.cmd mount ^<snap-id^> [drive]          Mount snapshot read-only (default: R:)
-echo   restore.cmd unmount [drive]                   Unmount (default: R:)
-echo   restore.cmd restore ^<snap-id^> ^<target^> [flags] Restore to directory
+echo   restore.cmd list                                    List all kopia snapshots
+echo   restore.cmd mount ^<snap-id^> [drive]                Mount kopia snapshot read-only (default: R:)
+echo   restore.cmd unmount [drive]                         Unmount kopia mount (default: R:)
+echo   restore.cmd restore ^<snap-id^> ^<target^> [flags]   Restore kopia snapshot to directory
+echo   restore.cmd wbadmin ^<file-path^> [output-dir]       Pull one file from latest wbadmin image (elevated)
 echo.
-echo System image restore:
+echo System image restore (full bare-metal):
 echo   1. Boot from Windows 11 USB
 echo   2. Repair your computer ^> Troubleshoot ^> System Image Recovery
-echo   3. Select image from D:\WindowsImageBackup (or F: if mirrored)
+echo   3. Select image from D:\WindowsImageBackup
 echo.
-echo Mount a wbadmin VHD for file-level recovery:
+echo Manual wbadmin VHD mount fallback (if 'restore.cmd wbadmin' fails):
 echo   diskpart
 echo     select vdisk file="D:\WindowsImageBackup\...\backup.vhdx"
 echo     attach vdisk readonly

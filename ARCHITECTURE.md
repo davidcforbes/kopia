@@ -25,7 +25,7 @@ place. They are now.
 | `kopia.exe`            | `C:\Users\david\go\bin\kopia.exe`                         | Snapshot/restore engine. Built from this fork (`go install ./...`).      |
 | `backup-monitor.exe`   | `C:\dev\backup-monitor\target\release\backup-monitor.exe` | Direct2D GUI dashboard. Parses logs and renders status cards live.       |
 | `backup-dump.exe`      | `C:\dev\backup-monitor\target\release\backup-dump.exe`    | Console version of the same scoring engine. **Use this from agents.**    |
-| `backup-indexer.exe`   | `C:\dev\backup-monitor\target\release\backup-indexer.exe` | Builds gzipped JSONL search indexes; runs nightly inside the wrapper.    |
+| `backup-indexer.exe`   | `C:\dev\backup-monitor\target\release\backup-indexer.exe` | Builds gzipped JSONL search indexes in `D:\BackupMonitorIndex`. Wired into `daily_kopia_backup.cmd` after maintenance — non-fatal on failure. Bootstrap with `scripts/run_indexer_backfill.cmd` (elevated). |
 
 `backup-monitor`'s parsing covers `C:\dev\kopia\logs\daily_kopia.log`
 plus the `Microsoft-Windows-Backup` event log. It produces a single
@@ -45,6 +45,7 @@ matches. Do not improvise.
 | Was the daily wrapper invoked at all?               | `C:\dev\kopia\logs\daily_kopia.log` mtime + the `Daily Kopia backup start` marker.                                |
 | Are there outstanding flagged failures?             | `C:\dev\kopia\logs\BACKUP_ERRORS.flag` and `BACKUP_HEALTH_FAIL.flag` and `WBADMIN_HEALTH_FAIL.flag`.               |
 | Toast click target / how to open the dashboard?     | `kopiamonitor:` URL protocol, registered HKCU, points at `backup-monitor.exe` (see `register_backup_monitor_toast.ps1`). |
+| Why does Find & Restore show no matches for a known file? | Compare newest mtime in `D:\BackupMonitorIndex\kopia-*.jsonl.gz` against today. If older than the latest snapshot, the indexer didn't run — find `[indexer]` lines in `daily_kopia.log`. |
 
 When two of these disagree, **report the disagreement**. Do not pick a
 winner.
@@ -68,7 +69,13 @@ winner.
 | `KopiaBackupHealthCheck`   | Daily 08:00     | Runs `check_backup_health.ps1` (watchdog: did the daily run write a `snapshot summary` line?).          |
 | `WbadminHealthCheck`       | Daily 08:30     | Runs `check_wbadmin_health.ps1` (wbadmin freshness via `wbadmin get versions` + Backup event log).      |
 | `WeeklyBackupVerify`       | Weekly Sat 04:00| Runs `verify_backups.cmd` (`kopia snapshot verify` + content sample + full maintenance).                |
-| `WeeklySystemImage`        | Weekly Mon 02:00| Runs `weekly_system_image.cmd`. **Currently broken**: script missing, last run rc=1. Tracked in beads.  |
+
+The daily wbadmin system image runs out of the built-in
+`\Microsoft\Windows\Backup\Microsoft-Windows-WindowsBackup` task (Windows-managed,
+templateId-based, fires at 02:00 to `D:` with `-allCritical`). A second
+`\Backup\WeeklySystemImage` task previously existed but was redundant with the
+daily run, conflicted on the same target, and its companion script was missing
+since the 04-25 incident — it was deleted 2026-05-02 (kopia-5o6 closed).
 
 ## Notification chain
 
