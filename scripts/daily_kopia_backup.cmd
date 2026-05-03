@@ -16,6 +16,12 @@ set LOG=C:\dev\kopia\logs\daily_kopia.log
 set SCRIPT_DIR=C:\dev\kopia\scripts
 set OVERALL_RC=0
 
+REM Pin PowerShell to Windows PowerShell 5.1 - the toast helpers depend on
+REM the [Type, Asm, ContentType=WindowsRuntime] WinRT loader which PS 7+
+REM dropped. Bare powershell.exe resolves to PS 7 when it's installed
+REM ahead of System32 in PATH, silently breaking toasts.
+set PS_BIN=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe
+
 REM Rotate log if over 1MB
 for %%F in ("%LOG%") do if %%~zF GTR 1048576 (
     if exist "%LOG%.old" del "%LOG%.old"
@@ -47,7 +53,7 @@ if not exist "%VERIFY_PS%" (
     echo ======================================== >> "%LOG%"
     exit /b 1
 )
-powershell.exe -NoProfile -Command "$s=Get-AuthenticodeSignature '%VERIFY_PS%'; if($s.Status -ne 'Valid'){Write-Host \"verify_helpers_preflight.ps1(Status=$($s.Status))\"; exit 1}; exit 0" > "%TEMP%\kopia_sig_check.txt" 2>&1
+"%PS_BIN%" -NoProfile -Command "$s=Get-AuthenticodeSignature '%VERIFY_PS%'; if($s.Status -ne 'Valid'){Write-Host \"verify_helpers_preflight.ps1(Status=$($s.Status))\"; exit 1}; exit 0" > "%TEMP%\kopia_sig_check.txt" 2>&1
 set SIG_RC=%errorlevel%
 if %SIG_RC% NEQ 0 (
     for /f "delims=" %%L in ('type "%TEMP%\kopia_sig_check.txt"') do echo %DATE% %TIME% — FATAL: bootstrap sig: %%L >> "%LOG%"
@@ -57,7 +63,7 @@ if %SIG_RC% NEQ 0 (
 )
 del "%TEMP%\kopia_sig_check.txt" 2>nul
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%VERIFY_PS%" -ScriptsDir "%SCRIPT_DIR%" -KopiaBin "%KOPIA_BIN%" >> "%LOG%" 2>&1
+"%PS_BIN%" -NoProfile -ExecutionPolicy Bypass -File "%VERIFY_PS%" -ScriptsDir "%SCRIPT_DIR%" -KopiaBin "%KOPIA_BIN%" >> "%LOG%" 2>&1
 if errorlevel 1 (
     echo %DATE% %TIME% — FATAL: certificate preflight failed >> "%LOG%"
     echo ======================================== >> "%LOG%"
@@ -92,14 +98,14 @@ if not errorlevel 1 (
 REM ---- Preflight: wait for any other CLI kopia.exe (e.g. WeeklyBackupVerify) ----
 REM Filters by ExecutablePath so the always-on kopia-ui server does not match.
 echo %DATE% %TIME% — [preflight] checking for active kopia CLI process >> "%LOG%"
-powershell.exe -NoProfile -Command "exit (Get-CimInstance Win32_Process -Filter \"Name='kopia.exe'\" | Where-Object { $_.ExecutablePath -eq '%KOPIA_BIN%' } | Measure-Object).Count"
+"%PS_BIN%" -NoProfile -Command "exit (Get-CimInstance Win32_Process -Filter \"Name='kopia.exe'\" | Where-Object { $_.ExecutablePath -eq '%KOPIA_BIN%' } | Measure-Object).Count"
 if !errorlevel! GTR 0 (
     echo %DATE% %TIME% — WARNING: another kopia CLI is running, waiting up to 60 min >> "%LOG%"
     set /a KC=0
     :kopia_wait
     timeout /t 60 /nobreak >nul
     set /a KC+=1
-    powershell.exe -NoProfile -Command "exit (Get-CimInstance Win32_Process -Filter \"Name='kopia.exe'\" | Where-Object { $_.ExecutablePath -eq '%KOPIA_BIN%' } | Measure-Object).Count"
+    "%PS_BIN%" -NoProfile -Command "exit (Get-CimInstance Win32_Process -Filter \"Name='kopia.exe'\" | Where-Object { $_.ExecutablePath -eq '%KOPIA_BIN%' } | Measure-Object).Count"
     if !errorlevel! GTR 0 (
         if !KC! LSS 60 (
             echo %DATE% %TIME% — [preflight] kopia CLI still running ^(!KC! min^) >> "%LOG%"
@@ -125,7 +131,7 @@ if errorlevel 1 (
 
 REM ---- Verify repo connection (120s timeout via PowerShell) ----
 echo %DATE% %TIME% — [repo-check] verifying repo connection ^(120s timeout^) >> "%LOG%"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\repo_status_check.ps1" -KopiaBin "%KOPIA_BIN%" -ConfigFile "%KOPIA_CFG_PATH%" -LogFile "%LOG%" -TimeoutSec 120
+"%PS_BIN%" -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\repo_status_check.ps1" -KopiaBin "%KOPIA_BIN%" -ConfigFile "%KOPIA_CFG_PATH%" -LogFile "%LOG%" -TimeoutSec 120
 set REPO_RC=%errorlevel%
 echo %DATE% %TIME% — [repo-check] exit code: %REPO_RC% >> "%LOG%"
 if %REPO_RC% EQU 99 (
@@ -197,7 +203,7 @@ echo %DATE% %TIME% — Repo stats: >> "%LOG%"
 
 REM ---- Error check ----
 set ALERT_FILE=C:\dev\kopia\logs\BACKUP_ERRORS.flag
-for /f %%N in ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\check_backup_errors.ps1" "%LOG%"') do set ERR_COUNT=%%N
+for /f %%N in ('"%PS_BIN%" -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\check_backup_errors.ps1" "%LOG%"') do set ERR_COUNT=%%N
 if "!ERR_COUNT!"=="" set ERR_COUNT=0
 if !ERR_COUNT! GTR 0 (
     echo %DATE% %TIME% — WARNING: !ERR_COUNT! unexpected errors detected >> "%LOG%"
@@ -215,7 +221,7 @@ REM in commit 1f5c6604). Aggregates errors/files/bytes across sources
 REM into one PASS/FAIL/UNKNOWN toast. Independent of the existing error-
 REM count flag-file mechanism above.
 echo %DATE% %TIME% — [toast] posting summary >> "%LOG%"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\post_summary_toast.ps1" -LogFile "%LOG%" >> "%LOG%" 2>&1
+"%PS_BIN%" -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\post_summary_toast.ps1" -LogFile "%LOG%" >> "%LOG%" 2>&1
 
 REM ---- Summary ----
 echo %DATE% %TIME% — Exit codes: repo=%REPO_RC% snap1=!SNAP1_RC! snap2=!SNAP2_RC! maint=!MAINT_RC! errors=!ERR_COUNT! >> "%LOG%"
