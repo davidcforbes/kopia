@@ -71,6 +71,31 @@ if errorlevel 1 (
 )
 echo %DATE% %TIME% — [preflight] helpers signed, fresh, and from expected publisher >> "%LOG%"
 
+REM ---- Resolve kopia repo-user password from DPAPI vault (epic kopia-7s7) ----
+REM In API-mode the wrapper authenticates to \Backup\KopiaServer as user
+REM david@chrislaptop2. Windows Credential Manager isn't reliably accessible
+REM from S4U / elevated split-token task contexts, so the wrapper resolves
+REM KOPIA_PASSWORD each run via the LocalMachine-DPAPI vault. Helper script
+REM is in the signed-targets list (already verified in cert preflight above).
+set KPW_TMP=%TEMP%\kopia-pw-%RANDOM%.tmp
+"%PS_BIN%" -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\get_kopia_server_password.ps1" > "%KPW_TMP%" 2>>"%LOG%"
+set HELPER_RC=%errorlevel%
+echo %DATE% %TIME% — [preflight] vault helper rc=%HELPER_RC% >> "%LOG%"
+if %HELPER_RC% NEQ 0 (
+    echo %DATE% %TIME% — FATAL: vault helper exited %HELPER_RC% >> "%LOG%"
+    del "%KPW_TMP%" 2>nul
+    echo ======================================== >> "%LOG%"
+    exit /b 1
+)
+for /f "usebackq delims=" %%P in ("%KPW_TMP%") do set KOPIA_PASSWORD=%%P
+del "%KPW_TMP%" 2>nul
+if not defined KOPIA_PASSWORD (
+    echo %DATE% %TIME% — FATAL: empty password from vault helper ^(rc=0 but no stdout^) >> "%LOG%"
+    echo ======================================== >> "%LOG%"
+    exit /b 1
+)
+echo %DATE% %TIME% — [preflight] KOPIA_PASSWORD resolved from DPAPI vault >> "%LOG%"
+
 REM ---- Preflight: check if wbadmin is still running ----
 echo %DATE% %TIME% — [preflight] checking for active wbadmin >> "%LOG%"
 tasklist /fi "imagename eq wbengine.exe" /nh 2>nul | findstr /i "wbengine" >nul
@@ -95,53 +120,23 @@ if not errorlevel 1 (
     echo %DATE% %TIME% — [preflight] no active wbadmin >> "%LOG%"
 )
 
-REM ---- Preflight: wait for any other CLI kopia.exe (e.g. WeeklyBackupVerify) ----
-REM Filters by ExecutablePath so the always-on kopia-ui server does not match.
-echo %DATE% %TIME% — [preflight] checking for active kopia CLI process >> "%LOG%"
-"%PS_BIN%" -NoProfile -Command "exit (Get-CimInstance Win32_Process -Filter \"Name='kopia.exe'\" | Where-Object { $_.ExecutablePath -eq '%KOPIA_BIN%' } | Measure-Object).Count"
-if !errorlevel! GTR 0 (
-    echo %DATE% %TIME% — WARNING: another kopia CLI is running, waiting up to 60 min >> "%LOG%"
-    set /a KC=0
-    :kopia_wait
-    timeout /t 60 /nobreak >nul
-    set /a KC+=1
-    "%PS_BIN%" -NoProfile -Command "exit (Get-CimInstance Win32_Process -Filter \"Name='kopia.exe'\" | Where-Object { $_.ExecutablePath -eq '%KOPIA_BIN%' } | Measure-Object).Count"
-    if !errorlevel! GTR 0 (
-        if !KC! LSS 60 (
-            echo %DATE% %TIME% — [preflight] kopia CLI still running ^(!KC! min^) >> "%LOG%"
-            goto kopia_wait
-        ) else (
-            echo %DATE% %TIME% — WARNING: kopia CLI still running after 60 min, proceeding >> "%LOG%"
-        )
-    ) else (
-        echo %DATE% %TIME% — [preflight] kopia CLI finished after !KC! min >> "%LOG%"
-    )
-) else (
-    echo %DATE% %TIME% — [preflight] no other kopia CLI active >> "%LOG%"
-)
+REM ---- Preflight: kopia CLI wait + repo lock scan removed (epic kopia-7s7) ----
+REM Both were guards against repo-lock races between multiple direct-mode
+REM kopia clients. With repository.config in API mode (\Backup\KopiaServer
+REM is the sole repo holder), concurrent kopia.exe invocations route via
+REM the upstream server and are race-free by construction.
 
-REM ---- Preflight: repo lock files ----
-echo %DATE% %TIME% — [preflight] checking repo dir for locks >> "%LOG%"
-dir /b "%KOPIA_REPO%\*.lock" "%KOPIA_REPO%\kopia.repository.l*" 2>nul >> "%LOG%"
-if errorlevel 1 (
-    echo %DATE% %TIME% — [preflight] no lock files >> "%LOG%"
-) else (
-    echo %DATE% %TIME% — [preflight] lock file^(s^) present ^(may be normal^) >> "%LOG%"
-)
-
-REM ---- Verify repo connection (120s timeout via PowerShell) ----
-echo %DATE% %TIME% — [repo-check] verifying repo connection ^(120s timeout^) >> "%LOG%"
-"%PS_BIN%" -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\repo_status_check.ps1" -KopiaBin "%KOPIA_BIN%" -ConfigFile "%KOPIA_CFG_PATH%" -LogFile "%LOG%" -TimeoutSec 120
+REM ---- Verify repo connection (epic kopia-7s7: server health probe) ----
+REM Direct kopia.exe call so KOPIA_PASSWORD env var inherits cleanly without
+REM going through a PowerShell intermediate. Output captured to log so any
+REM failure surfaces actionable diagnostics (the previous PS-wrapped call
+REM was eating kopia's stderr in elevated/S4U contexts).
+echo %DATE% %TIME% — [repo-check] verifying repo connection >> "%LOG%"
+"%KOPIA_BIN%" %KOPIA_CFG% repository status >> "%LOG%" 2>&1
 set REPO_RC=%errorlevel%
 echo %DATE% %TIME% — [repo-check] exit code: %REPO_RC% >> "%LOG%"
-if %REPO_RC% EQU 99 (
-    echo %DATE% %TIME% — FATAL: repo status hung for 120s — possible stale lock >> "%LOG%"
-    echo %DATE% %TIME% — Try: kopia repository disconnect / reconnect >> "%LOG%"
-    echo ======================================== >> "%LOG%"
-    exit /b 1
-)
 if %REPO_RC% NEQ 0 (
-    echo %DATE% %TIME% — FATAL: repo status failed ^(rc=%REPO_RC%^). Run setup_all.cmd >> "%LOG%"
+    echo %DATE% %TIME% — FATAL: repo status failed ^(rc=%REPO_RC%^). Check \Backup\KopiaServer task. >> "%LOG%"
     echo ======================================== >> "%LOG%"
     exit /b 1
 )
@@ -162,10 +157,10 @@ echo %DATE% %TIME% — [snapshot] C:\Users\david finished ^(rc=!SNAP2_RC!^) >> "
 if !SNAP2_RC! NEQ 0 set OVERALL_RC=1
 
 REM ---- Maintenance ----
-echo %DATE% %TIME% — [maintenance] starting >> "%LOG%"
-"%KOPIA_BIN%" %KOPIA_CFG% maintenance run >> "%LOG%" 2>&1
-set MAINT_RC=!errorlevel!
-echo %DATE% %TIME% — [maintenance] finished ^(rc=!MAINT_RC!^) >> "%LOG%"
+REM Upstream server runs full+quick maintenance per repo policy (epic kopia-7s7).
+REM MAINT_RC stays in the Exit codes line for backup-monitor.exe parser stability.
+echo %DATE% %TIME% — [maintenance] handled by \Backup\KopiaServer per policy >> "%LOG%"
+set MAINT_RC=0
 
 REM ---- Index newly-created snapshots so backup-monitor's Find & Restore
 REM      page sees today's (latest-1) snapshot. Failures here are NON-fatal:
