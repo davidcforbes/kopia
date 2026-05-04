@@ -26,10 +26,13 @@ place. They are now.
 | `backup-monitor.exe`   | `C:\dev\backup-monitor\target\release\backup-monitor.exe` | Direct2D GUI dashboard. Parses logs and renders status cards live.       |
 | `backup-dump.exe`      | `C:\dev\backup-monitor\target\release\backup-dump.exe`    | Console version of the same scoring engine. **Use this from agents.**    |
 | `backup-indexer.exe`   | `C:\dev\backup-monitor\target\release\backup-indexer.exe` | Builds gzipped JSONL search indexes in `D:\BackupMonitorIndex`. Wired into `daily_kopia_backup.cmd` after maintenance — non-fatal on failure. Bootstrap with `scripts/run_indexer_backfill.cmd` (elevated). |
+| `KopiaUI.exe`          | `C:\dev\kopia\dist\kopia-ui\win-unpacked\KopiaUI.exe`     | Electron desktop app (long-running tray process). Spawns a bundled `kopia.exe server` child (path: `…\resources\server\kopia.exe`) with `--config-file` pointing at the same `%APPDATA%\kopia\repository.config` the CLI/wrapper uses. Runs Kopia's policy-driven maintenance schedule independent of the OS task scheduler, and emits its own toasts under AppId `electron.app.KopiaUI`. **Holds repo credentials in memory** — restart after any password rotation. |
 
 `backup-monitor`'s parsing covers `C:\dev\kopia\logs\daily_kopia.log`
 plus the `Microsoft-Windows-Backup` event log. It produces a single
 PASS/FAIL/STATUS-CARDS verdict per run and a paginated history.
+KopiaUI is a parallel emitter — `backup-monitor` does **not** parse
+KopiaUI's logs or surface its maintenance failures.
 
 ## Authoritative source by question
 
@@ -61,6 +64,8 @@ winner.
 | `C:\dev\kopia\logs\BACKUP_ERRORS.flag`                     | `daily_kopia_backup.cmd` v2         | Touched when `check_backup_errors.ps1` reports `errors > 0`. Removed on PASS.                     |
 | `C:\dev\kopia\logs\BACKUP_HEALTH_FAIL.flag`                | `check_backup_health.ps1`           | Touched when watchdog detects a missed run / no summary line.                                     |
 | `C:\dev\kopia\logs\WBADMIN_HEALTH_FAIL.flag`               | `check_wbadmin_health.ps1`          | Touched when wbadmin freshness exceeds threshold or a failure event is found.                    |
+| `%APPDATA%\kopia-ui\logs\main.log`                         | KopiaUI Electron + bundled server   | KopiaUI lifecycle + per-notification `NOTIFICATION:` JSON lines. Authoritative source for KopiaUI maintenance failures. Rolls to `main.old.log` at ~1 MB. |
+| `%LOCALAPPDATA%\Microsoft\Windows\Notifications\wpndatabase.db` | Windows notification platform   | SQLite store of all delivered toasts (any AppId). Useful when investigating a mystery toast — see `reference_toast_debugging.md` memory or query `Notification` joined to `NotificationHandler.PrimaryId`. Default retention ~3 days. |
 
 ## Scheduled tasks (under `\Backup\`)
 
