@@ -1,26 +1,51 @@
-# check_backup_errors.ps1 — Check current Kopia run for real errors
-param([string]$LogFile)
+# start_kopia_server.ps1 — launcher invoked by \Backup\KopiaServer scheduled task
+# at system startup. Reads the server API password from the DPAPI vault, exports
+# it as KOPIA_SERVER_PASSWORD, and execs kopia.exe in long-running server mode.
+#
+# Owns the kopia repository on disk. Both the daily backup wrapper and KopiaUI
+# (configured in client mode) talk to this server via its REST API on
+# 127.0.0.1:51515 with the pinned TLS fingerprint at D:\KopiaServer\fingerprint.sha256.
+#
+# Stays in foreground so the scheduled task's Restart-on-failure semantics work.
+# DPAPI LocalMachine decrypt requires this process to run elevated (RunLevel=Highest
+# in the task definition).
 
-$lines = Get-Content -Path $LogFile
-$startIdx = 0
-for ($i = $lines.Count - 1; $i -ge 0; $i--) {
-    if ($lines[$i] -match 'Daily Kopia backup start') {
-        $startIdx = $i
-        break
-    }
+[CmdletBinding()]
+param(
+    [string]$KopiaBin   = 'C:\Users\david\go\bin\kopia.exe',
+    [string]$ConfigFile = "$env:APPDATA\kopia\repository.config",
+    [string]$CertFile   = 'D:\KopiaServer\server.crt',
+    [string]$KeyFile    = 'D:\KopiaServer\server.key',
+    [string]$Address    = '127.0.0.1:51515',
+    [string]$VaultHelper = 'C:\dev\kopia\scripts\get_kopia_server_password.ps1'
+)
+
+$ErrorActionPreference = 'Stop'
+
+# Resolve the API password from the vault (DPAPI LocalMachine).
+$pw = & $VaultHelper
+if (-not $pw) {
+    Write-Error "Empty password from $VaultHelper"
+    exit 1
 }
+$env:KOPIA_SERVER_PASSWORD = $pw
 
-$runLines = $lines[$startIdx..($lines.Count - 1)]
-$errors = $runLines | Where-Object { $_ -match 'error' } |
-    Where-Object { $_ -notmatch 'Ignored error|Ignored \d+ error|errors[=:.]|possible stall|WARNING:|0 errors|ERROR:|error handling' }
-
-Write-Output $errors.Count
+# Hand off to kopia.exe. Stays in foreground; the scheduled task's
+# Restart-on-failure setting handles unexpected exits.
+& $KopiaBin server start `
+    --address=$Address `
+    --server-username=kopia `
+    --tls-cert-file=$CertFile `
+    --tls-key-file=$KeyFile `
+    --config-file=$ConfigFile `
+    --error-notifications=always
+exit $LASTEXITCODE
 
 # SIG # Begin signature block
 # MII9bgYJKoZIhvcNAQcCoII9XzCCPVsCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBRxjjfJP4un5DQ
-# vcSGw4ugR+8SNfMrEovEhHbKaZibFaCCIjAwggXMMIIDtKADAgECAhBUmNLR1FsZ
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAIPXwKhPv09s41
+# HgCu21mAHDPzpLafVwpxKBZcS/bW0qCCIjAwggXMMIIDtKADAgECAhBUmNLR1FsZ
 # lUgTecgRwIeZMA0GCSqGSIb3DQEBDAUAMHcxCzAJBgNVBAYTAlVTMR4wHAYDVQQK
 # ExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xSDBGBgNVBAMTP01pY3Jvc29mdCBJZGVu
 # dGl0eSBWZXJpZmljYXRpb24gUm9vdCBDZXJ0aWZpY2F0ZSBBdXRob3JpdHkgMjAy
@@ -207,20 +232,20 @@ Write-Output $errors.Count
 # cmF0aW9uMSswKQYDVQQDEyJNaWNyb3NvZnQgSUQgVmVyaWZpZWQgQ1MgRU9DIENB
 # IDA0AhMzAAC99TK+FBrpFtcPAAAAAL31MA0GCWCGSAFlAwQCAQUAoF4wEAYKKwYB
 # BAGCNwIBDDECMAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwLwYJKoZIhvcN
-# AQkEMSIEIK1vwxVv4FzHXE6zX3mU4qCle8xOYki1pwI92PCigSPcMA0GCSqGSIb3
-# DQEBAQUABIIBgKV+BSIjWcFtFHyPyRbATIFf/Cz7kT2JUyrnOJ445inhQmeAypre
-# 0YUMIEeBTWMaPNU0v9trIj//ZSOu11yd699eZBE9SX9gRiKE5Qn+YJ+UCAvQ5pDV
-# KzOXEgcbsxVHkuKetYrqAGTGC7xVlY6Z0GQLRgurRLkhoPpkm6xNgk577JgZ+Zhc
-# txC8kx5w3rJqesGETEmcPL3EdYIk+KQzIaPXs+3oHldRXo/0mkZJr1kJNrJTiySV
-# wQfP5KdJEBCPfKrfPqrzQxd8gwwtcwbos7mgGP/J3E+hJWOvdlFFcC30BvffBu4R
-# GY3BSd7sRxzLtbFETRJufjaPfoDECxjnvEH6GZkcwNZkvWccVsDG9Va8MzDjGnX7
-# X1u9IS00IWdSwzEhFGYIFBK+kuH29yzrryynj2kfdH0Bb8pLKDa6dr1OayYQOthR
-# P7Y+GX8rjdXokHsM7LnXD+3PeAQ5B7uj3VL28PQ447Sfz0g/yIVlcG2wB/qJTjCL
-# 180XLcEEi2Lf96GCGBQwghgQBgorBgEEAYI3AwMBMYIYADCCF/wGCSqGSIb3DQEH
+# AQkEMSIEILYmC+TIkQde+HV/leJjPe7kTEvvZEz4nQKRPueKt5kdMA0GCSqGSIb3
+# DQEBAQUABIIBgBbRaIJEtBI5OWjUu2rwrkrLvXOAnAnodCxwy13Sora5XuVX7CIn
+# /7sS+evBGrGjqhmhN4p3xgYWYgj4vzDoKk//HC/RDL2TK3baQtyaSTsnMvWeeNTH
+# 6jNvepNJVnOcO9Gltehg9jiUeFuz7vdfQlc3GVuF3kds+xuggW877C4oXb1QmDDE
+# BEj2AAkLeRFn1fKL2nVr328TZ7H4iRgKhGMWehE8CBnbX/GHhPT0HVB6d68fP5KF
+# yu4cNGoTZ15yK0H0bXxm4LiKlqp6N1LfgGmEYGnvW3jUfRYJp5zIvKdd/QMqoyO9
+# NbXh9G5QRF6acvY7GEfYHtW7DtN/gbbpRNIMLcMgJJUJXTQeakWu0g1TbtDfe6fu
+# Oi6oGXigLBXIFvLDdLLl/BaVbtrmatmco4Jo7S8ufICcCGh9N0HqIfK/o2dN6fF3
+# 2qtN9iRHkdacNS7YE3CaQNnRNKAsbvqAl/927IsFIdKJ2cvMIjjbSKHhPA0+Rrow
+# 2r3Axnc64rsE8aGCGBQwghgQBgorBgEEAYI3AwMBMYIYADCCF/wGCSqGSIb3DQEH
 # AqCCF+0wghfpAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFiBgsqhkiG9w0BCRABBKCC
-# AVEEggFNMIIBSQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCCT8dcY
-# XmXmKwyMvrpiWJq5B3IUelcRCHI8wQhWrrBavQIGaeddguWVGBMyMDI2MDUwNDIw
-# MDAwNi4xOTJaMASAAgH0oIHhpIHeMIHbMQswCQYDVQQGEwJVUzETMBEGA1UECBMK
+# AVEEggFNMIIBSQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCCs8VTw
+# d8iVAFsxkoBzYNTuGwKEVBcJk6ItZ8n0yxMHKQIGaeddguXZGBMyMDI2MDUwNDIw
+# MDAxOC41NjhaMASAAgH0oIHhpIHeMIHbMQswCQYDVQQGEwJVUzETMBEGA1UECBMK
 # V2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0
 # IENvcnBvcmF0aW9uMSUwIwYDVQQLExxNaWNyb3NvZnQgQW1lcmljYSBPcGVyYXRp
 # b25zMScwJQYDVQQLEx5uU2hpZWxkIFRTUyBFU046QTUwMC0wNUUwLUQ5NDcxNTAz
@@ -310,8 +335,8 @@ Write-Output $errors.Count
 # dGlvbjEyMDAGA1UEAxMpTWljcm9zb2Z0IFB1YmxpYyBSU0EgVGltZXN0YW1waW5n
 # IENBIDIwMjACEzMAAABWfo+dWAiO6WAAAAAAAFYwDQYJYIZIAWUDBAIBBQCgggSf
 # MBEGCyqGSIb3DQEJEAIPMQIFADAaBgkqhkiG9w0BCQMxDQYLKoZIhvcNAQkQAQQw
-# HAYJKoZIhvcNAQkFMQ8XDTI2MDUwNDIwMDAwNlowLwYJKoZIhvcNAQkEMSIEINpU
-# PVNsrKUWQQGb16MxhbAtoIYoa0eMI7C5OYGuJ1zmMIG5BgsqhkiG9w0BCRACLzGB
+# HAYJKoZIhvcNAQkFMQ8XDTI2MDUwNDIwMDAxOFowLwYJKoZIhvcNAQkEMSIEINeQ
+# t1C57zZmJfRQCKNgdUyZKfPfackP0SIfdNBCod5zMIG5BgsqhkiG9w0BCRACLzGB
 # qTCBpjCBozCBoAQgtgwzJU2k4/CVd4k4OV56XuAkh+tNeN2fl/aOTQYDDKgwfDBl
 # pGMwYTELMAkGA1UEBhMCVVMxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlv
 # bjEyMDAGA1UEAxMpTWljcm9zb2Z0IFB1YmxpYyBSU0EgVGltZXN0YW1waW5nIENB
@@ -334,15 +359,15 @@ Write-Output $errors.Count
 # D14v26yzqc9xYP3QeRKHNmLw3CByBz3yuUPJEwIbZHGokyiBeStfc811KcutB9sp
 # KXOTagQ+4ki7PFdAvbgsI9jPYaMrCdEAUDCOBVZs8yErDtUQWX045DWB3LNzaVYC
 # bZWerPwNplsf7yprUUV7Bfdw6RfK7RnRnSEeGf4uMjANBgkqhkiG9w0BAQEFAASC
-# AgBWL+VPgT3Rx7ZrP/4XQdw2M2bpY+9XrN/mJm1W+tw1EPd58FKb5w/fJGH4XpqQ
-# jFBIoj3xLoIHVwJ58QGXMLN95Axw39hiMPwUSEFUdfMZ7JjcSEu06tB+oxOA8tcu
-# bVoCa0QFzuLhehSQQx7bHpQz1jBWEoPIpgd9n3MgfnINzRZ2u9mOhAoxLmJ3R/yl
-# YWjZakTKE6fwww6xVlcvit1bDoNP2tKPUxOrTlyTkZC6ZVzG3SGfsg8q2SRfKQDe
-# XW5z1gxLtV38/RV8r+mFxOnuJtHiDLkdWpSOB97cwJWqWlk2jSSCJaPaj7oS4URc
-# dcQObB0OQl6ypA5f71N+JXthG0xmIyPnBcVrSVI4FHUyLstiVrkAPBcmXf0dm9a5
-# Ew/lZTJ/J3CxV6pMIAbkHIVJqI6kO+ySzPHxny3E0zGv0Vjxxsjm8xsmfM7UM3Ai
-# /saDB0CVotEohx65D+IKijXxOjskXyC49ikoGEU++jtP/LRxF7wx/1uz3OYsefqr
-# 8+NMH8yCWGgA6danQ+L36BFMFMgMYxpol06UFgsVllnO4Zs4VM+RiWSiTsR24S1n
-# wbZDkUvynqm2ChIi7wYIEHpjxVEAWi3YmMyillfVw7JW03BqTcVtDsCc4KAAm3DG
-# zLZdyeSOWEjjjgXNX8PeOoYGPhL+VO6KABugHWNqDS5JWg==
+# AgCREabprHJ0YyV8RpCLtbVdnyEHMrbMlJ05+KB7OQjDUP0QALRwa2yCxQ5wMtQ1
+# c1H7zsqRoKON7dhP8Hr+wUbNmu4CMnuRqofVezFGdyuP2YNACGv50a/l8zKdjy5h
+# khRTCMQoVyYAdUbOYxD+b9YTiy/wdOQHDB1j5Vb2u82EtRaLygyDmNH6ADhSBiNK
+# 6Wkp3B3ldEM5XxohwJKs3hV7vG0PKZ3fQ3R3Vmt1RLo4ssMfr2oy5k6/wWoT0D5T
+# +algcza0tqa1aH0+aNDukKmprBO9udKBqoG2rKZ2KqLXH520KCZnzhJnWoQXpoQr
+# ny9IuS78lr0kZ1LHkcpy+AQesDL2aqnIreMXC38LJeArjJrqoxYHm0NDHmwNaaYj
+# xLKhPDhyySABtPTddwT37qHCkVnq1wZKVFIsJJpQOB88HuefE3jh7hyj78718oCM
+# 2ketYA/3oTg4Bm9DJQJpIvrqOKyDO0WXdauh869piWvDTqQjceEydggiGlYHvMo5
+# q1emprKHjhlYpjan4+TyapABbX5xCO0mXLm4DoxoPFac8lB8NSENtLhUIoUXd6Ji
+# QU3AcbxJXq/650iztiL1krHy0C8TSYdivAazH4j6/6K8fCGlEXzsx9Mib33wJBxV
+# cGuoIBg3CVBYUMaJ9vvUx0uEY5hcgGLEtzN+n2GzkfQmWA==
 # SIG # End signature block
