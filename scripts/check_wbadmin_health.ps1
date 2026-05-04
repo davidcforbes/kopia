@@ -124,9 +124,7 @@ try {
 
 if ($age.TotalHours -le $FreshHours -and -not $failedSinceNewest) {
     if (Test-Path -LiteralPath $FlagFile) { Remove-Item -LiteralPath $FlagFile -Force }
-    Show-Toast -Title "Wbadmin Backup: PASS" `
-               -Body  "Last backup $newestS ($ageHours h ago)" `
-               -AppId $AppId -LaunchProto $LaunchProto
+    # Silent on PASS: watchdogs only toast when something is wrong.
     exit 0
 }
 

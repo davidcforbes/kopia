@@ -45,6 +45,7 @@ matches. Do not improvise.
 | Was the daily wrapper invoked at all?               | `C:\dev\kopia\logs\daily_kopia.log` mtime + the `Daily Kopia backup start` marker.                                |
 | Are there outstanding flagged failures?             | `C:\dev\kopia\logs\BACKUP_ERRORS.flag` and `BACKUP_HEALTH_FAIL.flag` and `WBADMIN_HEALTH_FAIL.flag`.               |
 | Toast click target / how to open the dashboard?     | `kopiamonitor:` URL protocol, registered HKCU, points at `backup-monitor.exe` (see `register_backup_monitor_toast.ps1`). |
+| "Kopia has encountered an error during Maintenance" toast appearing at odd hours? | Comes from KopiaUI's bundled server (AppId `electron.app.KopiaUI`), not from any watchdog. Inspect `%APPDATA%\kopia-ui\logs\main.log` for the `NOTIFICATION` line; verify `Get-CimInstance Win32_Process -Filter "Name='kopia.exe'"` shows the bundled binary at `dist\kopia-ui\…\resources\server\kopia.exe`. Restart KopiaUI to refresh in-memory credentials. |
 | Why does Find & Restore show no matches for a known file? | Compare newest mtime in `D:\BackupMonitorIndex\kopia-*.jsonl.gz` against today. If older than the latest snapshot, the indexer didn't run — find `[indexer]` lines in `daily_kopia.log`. |
 
 When two of these disagree, **report the disagreement**. Do not pick a
@@ -67,7 +68,7 @@ winner.
 |----------------------------|-----------------|---------------------------------------------------------------------------------------------------------|
 | `DailyKopiaSnapshotV2`     | Daily 03:00     | Runs `C:\dev\kopia\scripts\daily_kopia_backup.cmd` (v2 wrapper, RunLevel Highest, S4U logon).           |
 | `KopiaBackupHealthCheck`   | Daily 08:00     | Runs `check_backup_health.ps1` (watchdog: did the daily run write a `snapshot summary` line?).          |
-| `WbadminHealthCheck`       | Daily 08:30     | Runs `check_wbadmin_health.ps1` (wbadmin freshness via `wbadmin get versions` + Backup event log).      |
+| `WbadminHealthCheck`       | Daily 08:05     | Runs `check_wbadmin_health.ps1` (wbadmin freshness via `wbadmin get versions` + Backup event log).      |
 | `WeeklyBackupVerify`       | Weekly Sat 04:00| Runs `verify_backups.cmd` (`kopia snapshot verify` + content sample + full maintenance).                |
 
 The daily wbadmin system image runs out of the built-in
@@ -90,8 +91,23 @@ since the 04-25 incident — it was deleted 2026-05-02 (kopia-5o6 closed).
    `register_backup_monitor_toast.ps1`.
 4. The handler resolves to `backup-monitor.exe`, which loads the live
    dashboard.
-5. The 08:00 watchdog and 08:30 wbadmin checks are independent toasts
-   on the same `KopiaBackup.HealthCheck` AppId.
+5. The 08:00 watchdog and 08:05 wbadmin checks are independent toasts
+   on the same `KopiaBackup.HealthCheck` AppId. Both are **silent on
+   PASS** — they only emit a toast when something is wrong (FAIL,
+   STALE, NO RUN FOUND, etc.). Their flag files are still
+   written/cleared either way, so `backup-monitor.exe` reflects state.
+6. **External, parallel emitter:** the KopiaUI Electron desktop app
+   (`C:\dev\kopia\dist\kopia-ui\win-unpacked\KopiaUI.exe`) spawns a
+   bundled `kopia.exe server` with `--kopiaui-notifications
+   --error-notifications=always`. That server runs Kopia's
+   policy-driven maintenance schedule (quick + full) and emits its own
+   toasts under AppId **`electron.app.KopiaUI`** when a maintenance
+   operation fails. These are independent of `KopiaBackup.HealthCheck`
+   and are not parsed by `backup-monitor.exe`. If KopiaUI's bundled
+   server holds stale credentials (e.g. the repo password was rotated
+   while the server was running), every scheduled maintenance fires
+   this toast — restart KopiaUI to force the bundled server to
+   re-read the persisted credential.
 
 ## Secrets layout (post-consolidation 2026-04-29)
 
