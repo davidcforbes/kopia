@@ -1,5 +1,6 @@
-# Encrypted password (DPAPI LocalMachine scope) — never commit
+# Encrypted passwords (DPAPI LocalMachine scope) — never commit
 .kopia-pw.dat
+.kopia-server-pw.dat
 
 # Backup-monitor health flag (transient runtime state)
 BACKUP_ERRORS.flag
