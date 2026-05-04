@@ -189,12 +189,13 @@ if exist "!INDEXER!" (
     echo %DATE% %TIME% — WARNING: indexer not found at !INDEXER! ^(search will be stale^) >> "%LOG%"
 )
 
-REM ---- Snapshot list and stats ----
+REM ---- Snapshot list ----
+REM 'kopia content stats' was here but is direct-repository-only — the API
+REM client gets "operation supported only on direct repository". Same data
+REM is in backup-dump.exe STATUS CARDS via separate path, so dropping rather
+REM than guarding.
 echo %DATE% %TIME% — Snapshot list: >> "%LOG%"
 "%KOPIA_BIN%" %KOPIA_CFG% snapshot list --all >> "%LOG%" 2>&1
-
-echo %DATE% %TIME% — Repo stats: >> "%LOG%"
-"%KOPIA_BIN%" %KOPIA_CFG% content stats >> "%LOG%" 2>&1
 
 REM ---- Error check ----
 set ALERT_FILE=C:\dev\kopia\logs\BACKUP_ERRORS.flag
