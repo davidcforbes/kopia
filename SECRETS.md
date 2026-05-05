@@ -91,6 +91,13 @@ After regenerating, **all clients must be reconfigured** (the
 KopiaUI must be reconnected via "Connect to Repository Server" with
 the new password).
 
+The `\Backup\KopiaServer` launcher (`scripts/start_kopia_server.ps1`)
+reads BOTH vault files: `.kopia-pw.dat` → `KOPIA_PASSWORD` (for
+opening the repo on disk) and `.kopia-server-pw.dat` →
+`KOPIA_SERVER_PASSWORD` (HTTP basic auth for clients). Going via env
+vars rather than the OS keyring sidesteps Windows Credential Manager
+unreliability under S4U / elevated split-token contexts.
+
 ## TLS cert+key for the upstream kopia server
 
 The `\Backup\KopiaServer` task starts `kopia.exe server` with a stable
@@ -102,6 +109,7 @@ fixed SHA-256 fingerprint across server restarts.
 | Cert PEM | `D:\KopiaServer\server.crt` | Pinned via `--server-cert-fingerprint=<sha>` |
 | Key PEM  | `D:\KopiaServer\server.key` | Used by `kopia server start --tls-key-file=...` |
 | Fingerprint | `D:\KopiaServer\fingerprint.sha256` | One-line hex; convenience copy for clients |
+| Server-side config | `D:\KopiaServer\repository.config` | Filesystem-mode config kopia server uses to open `D:\KopiaRepo` directly. **Distinct** from the API-mode client config at `%APPDATA%\kopia\repository.config` — the latter would create a self-reference loop if the server tried to use it. Recreate with: copy from `%APPDATA%\kopia\repository.config.preserver-cutover.bak` (filesystem mode), then patch `caching.cacheDirectory` to an absolute path (e.g., `C:\Users\david\AppData\Local\kopia\7315bf3290de0739`) — the original relative path resolves wrong from `D:\KopiaServer\`. |
 
 ACL on the directory and all three files: `SYSTEM:F`, `Administrators:F`, `david:R`.
 
