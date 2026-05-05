@@ -56,6 +56,7 @@ Write-PhaseLog "  source: $source ($([int]((Get-Item $source).Length/1MB)) MB, $
 $copied = @()
 $skipped = @()
 $errors = @()
+$wouldCopy = @()
 
 foreach ($dest in $destinations) {
     $destDir = Split-Path $dest -Parent
@@ -77,19 +78,26 @@ foreach ($dest in $destinations) {
 
     # Idempotency: skip if already identical
     if (Test-Path $dest) {
-        $destHash = (Get-FileHash $dest -Algorithm SHA256).Hash
-        if ($destHash -eq $srcHash) {
-            $destSig = Get-AuthenticodeSignature $dest
-            if ($destSig.Status -eq 'Valid') {
-                Write-PhaseLog "  [ok] $dest already current (hash + sig match)" -Level ok
-                $skipped += "$dest (already current)"
-                continue
+        try {
+            $destHash = (Get-FileHash $dest -Algorithm SHA256 -ErrorAction Stop).Hash
+            if ($destHash -eq $srcHash) {
+                $destSig = Get-AuthenticodeSignature $dest -ErrorAction Stop
+                if ($destSig.Status -eq 'Valid') {
+                    Write-PhaseLog "  [ok] $dest already current (hash + sig match)" -Level ok
+                    $skipped += "$dest (already current)"
+                    continue
+                }
             }
+        } catch {
+            # Hash or sig-read failed transiently (file vanished, AV scan holding a handle).
+            # Treat as not-current and fall through to copy.
+            Write-PhaseLog "  [warn] $dest idempotency check failed: $($_.Exception.Message) — proceeding with copy" -Level warn
         }
     }
 
     if ($VerifyOnly) {
         Write-PhaseLog "  [would-copy] $dest" -Level info
+        $wouldCopy += $dest
         continue
     }
 
@@ -107,8 +115,30 @@ foreach ($dest in $destinations) {
     }
 }
 
+if ($VerifyOnly) {
+    if ($errors) {
+        $msg = "VerifyOnly: $($errors.Count) error(s); $($wouldCopy.Count) would-copy; $($skipped.Count) skipped — $($errors -join ' | ')"
+        Complete-PhaseRun -Run $run -Status 'failed' -Message $msg `
+            -RecommendedAction "stop the kopia.exe process holding the destination, then re-run make deploy-artifacts"
+        Write-PhaseLog "[deploy-artifacts] $msg" -Level err
+        exit 1
+    } elseif ($wouldCopy) {
+        # In VerifyOnly mode, a stale destination IS a failure — the point of verify is "is everything current?"
+        $msg = "VerifyOnly: $($wouldCopy.Count) destination(s) stale; $($skipped.Count) current"
+        Complete-PhaseRun -Run $run -Status 'failed' -Message $msg `
+            -RecommendedAction "make deploy-artifacts (without -VerifyOnly) to update: $($wouldCopy -join ', ')"
+        Write-PhaseLog "[deploy-artifacts] $msg" -Level warn
+        exit 1
+    } else {
+        $msg = "VerifyOnly: $($skipped.Count) destination(s) current"
+        Complete-PhaseRun -Run $run -Status 'ok' -Message $msg
+        Write-PhaseLog "[deploy-artifacts] $msg" -Level ok
+        exit 0
+    }
+}
+
 if ($errors) {
-    $msg = "$($errors.Count) error(s); $($copied.Count) copied; $($skipped.Count) skipped"
+    $msg = "$($errors.Count) error(s); $($copied.Count) copied; $($skipped.Count) skipped — $($errors -join ' | ')"
     Complete-PhaseRun -Run $run -Status 'failed' -Message $msg `
         -RecommendedAction "stop the kopia.exe process holding the destination, then re-run make deploy-artifacts"
     Write-PhaseLog "[deploy-artifacts] $msg" -Level err
