@@ -1,71 +1,86 @@
-# verify_helpers_preflight.ps1 — Rich Authenticode validation for the daily
-# backup preflight. For each signed target (kopia.exe + every .ps1 helper),
-# verifies:
-#   1. Status = Valid           (chain trust + integrity)
-#   2. Subject CN matches       (catches signature substitution)
-#   3. Timestamp present        (sig survives signer-cert expiry)
-#   4. Sig not too stale        (catches sign pipeline drift)
+# heartbeat_watchdog.ps1 — in-band stall guard for daily_kopia_backup.cmd.
 #
-# Exit 0 → ok to run the backup. Exit 1 → preflight FATAL.
+# Polls heartbeat.log every $CheckIntervalSec. If the file hasn't been touched
+# in $StallSec seconds, the upstream \Backup\KopiaServer is presumed stalled
+# and the wrapper's child kopia.exe(s) are killed — letting the wrapper FATAL
+# out within seconds instead of hanging until the 08:00 watchdog catches it.
+#
+# Lifecycle: the wrapper spawns this script with `start /B` and passes its own
+# PID as -WrapperPid. The script polls 'is wrapper alive?' alongside the stall
+# check; when the wrapper exits (success or failure), this script exits cleanly
+# with no further action.
+#
+# Heartbeat producer is kopia's --heartbeat-interval=60s flag (epic kopia-bcp.2);
+# defaults below assume that interval. With cadence 60s, $StallSec=180 means
+# the upstream missed at least three consecutive ticks before we conclude it's
+# really gone — protects long but progressing snapshots from false positives.
+#
+# Identifying which kopia.exe to kill: filter by ParentProcessId == $WrapperPid
+# via Get-WmiObject Win32_Process. Avoids killing the upstream server (whose
+# parent is the Task Scheduler service tree) or KopiaUI's bundled child (whose
+# parent is KopiaUI.exe).
+
 [CmdletBinding()]
 param(
-    [string]   $ScriptsDir          = 'C:\dev\kopia\scripts',
-    [string]   $KopiaBin            = 'C:\Users\david\go\bin\kopia.exe',
-    [string]   $ExpectedSubjectLike = '*Forbes Asset Management*',
-    [int]      $StaleDays           = 30
+    [Parameter(Mandatory)] [int]$WrapperPid,
+    [string]$HeartbeatFile  = 'C:\dev\kopia\logs\heartbeat.log',
+    [string]$DailyLog       = 'C:\dev\kopia\logs\daily_kopia.log',
+    [int]   $StallSec       = 180,
+    [int]   $CheckIntervalSec = 30
 )
 
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'SilentlyContinue'
 
-$targets = @(
-    $KopiaBin,
-    (Join-Path $ScriptsDir 'repo_status_check.ps1'),
-    (Join-Path $ScriptsDir 'check_backup_errors.ps1'),
-    (Join-Path $ScriptsDir 'check_backup_health.ps1'),
-    (Join-Path $ScriptsDir 'verify_helpers_preflight.ps1'),
-    (Join-Path $ScriptsDir 'get_kopia_password.ps1'),
-    (Join-Path $ScriptsDir 'get_kopia_server_password.ps1'),
-    (Join-Path $ScriptsDir 'start_kopia_server.ps1'),
-    (Join-Path $ScriptsDir 'heartbeat_watchdog.ps1')
-)
+function Now-Stamp { Get-Date -Format 'ddd MM/dd/yyyy  HH:mm:ss.ff' }
 
-$problems = @()
-foreach ($t in $targets) {
-    $name = Split-Path $t -Leaf
-    if (-not (Test-Path $t)) { $problems += "$name : missing"; continue }
-
-    $s = Get-AuthenticodeSignature $t
-    if ($s.Status -ne 'Valid') {
-        $problems += "$name : Status=$($s.Status) ($($s.StatusMessage))"; continue
-    }
-    if ($s.SignerCertificate.Subject -notlike $ExpectedSubjectLike) {
-        $problems += "$name : unexpected publisher: $($s.SignerCertificate.Subject)"; continue
-    }
-    if (-not $s.TimeStamperCertificate) {
-        $problems += "$name : no RFC3161 timestamp (sig will break when cert expires)"; continue
-    }
-    # Use the signer cert's NotBefore as the signing-time anchor (Trusted
-    # Signing certs are minted right before each sign call).
-    $signedAt = $s.SignerCertificate.NotBefore
-    $age      = ((Get-Date) - $signedAt).TotalDays
-    if ($age -gt $StaleDays) {
-        $problems += "$name : signed $([int]$age)d ago (>$StaleDays); sign pipeline may be stuck"
-    }
+function Append-DailyLog([string]$line) {
+    Add-Content -LiteralPath $DailyLog -Value $line -Encoding UTF8
 }
 
-if ($problems.Count -gt 0) {
-    foreach ($p in $problems) { Write-Host $p }
-    exit 1
-}
+while ($true) {
+    Start-Sleep -Seconds $CheckIntervalSec
 
-Write-Host "OK: $($targets.Count) signed targets verified (Forbes Asset Management, fresh)"
-exit 0
+    # Wrapper still alive? If not, exit cleanly — our work is done.
+    if (-not (Get-Process -Id $WrapperPid -ErrorAction SilentlyContinue)) {
+        exit 0
+    }
+
+    # Heartbeat freshness check. Missing file is treated as stale (the file is
+    # written every 60s when the upstream server is up; absence means it's
+    # genuinely down or has never started).
+    $stale = $true
+    $ageSec = -1
+    if (Test-Path $HeartbeatFile) {
+        $lwt = (Get-Item $HeartbeatFile).LastWriteTime
+        $ageSec = [int]((Get-Date) - $lwt).TotalSeconds
+        $stale = $ageSec -gt $StallSec
+    }
+    if (-not $stale) { continue }
+
+    # ---- Stall detected ----
+    Append-DailyLog "$(Now-Stamp) — FATAL: heartbeat stale ($ageSec s > $StallSec s); killing wrapper kopia children (parent PID $WrapperPid)"
+
+    # Find direct-child kopia.exe processes of the wrapper. Get-WmiObject is
+    # used because the newer Get-CimInstance is broken on this host.
+    $children = @(Get-WmiObject Win32_Process -Filter "Name='kopia.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.ParentProcessId -eq $WrapperPid })
+
+    if ($children.Count -eq 0) {
+        Append-DailyLog "$(Now-Stamp) — [stall-guard] no kopia.exe children of $WrapperPid found (likely already exited)"
+    }
+    foreach ($p in $children) {
+        Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+        Append-DailyLog "$(Now-Stamp) — [stall-guard] killed kopia.exe PID=$($p.ProcessId)"
+    }
+
+    exit 0
+}
 
 # SIG # Begin signature block
-# MII9bgYJKoZIhvcNAQcCoII9XzCCPVsCAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# MII9awYJKoZIhvcNAQcCoII9XDCCPVgCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCB0GNSapsBzFojJ
-# X+bFuzIUOFYe9Zv7V8x75oDgIIooS6CCIjAwggXMMIIDtKADAgECAhBUmNLR1FsZ
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBqXYh/4QO7Iky8
+# IHdEKEyIdYgJIp7IriHw75RdtBzQKKCCIjAwggXMMIIDtKADAgECAhBUmNLR1FsZ
 # lUgTecgRwIeZMA0GCSqGSIb3DQEBDAUAMHcxCzAJBgNVBAYTAlVTMR4wHAYDVQQK
 # ExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xSDBGBgNVBAMTP01pY3Jvc29mdCBJZGVu
 # dGl0eSBWZXJpZmljYXRpb24gUm9vdCBDZXJ0aWZpY2F0ZSBBdXRob3JpdHkgMjAy
@@ -247,28 +262,28 @@ exit 0
 # bbAXXpAZnU20FaAoDwqq/jwzwd8Wo2J83r7O3onQbDO9TyDStgaBNlHzMMQgl95n
 # HBYMelLEHkUnVVVTUsgC0Huj09duNfMaJ9ogxhPNThgq3i8w3DAGZ61AMeF0C1M+
 # mU5eucj1Ijod5O2MMPeJQ3/vKBtqGZg4eTtUHt/BPjN74SsJsyHqAdXVS5c+ItyK
-# Wg3Eforhox9k3WgtWTpgV4gkSiS4+A09roSdOI4vrRw+p+fL4WrxSK5nMYIalDCC
-# GpACAQEwcTBaMQswCQYDVQQGEwJVUzEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBv
+# Wg3Eforhox9k3WgtWTpgV4gkSiS4+A09roSdOI4vrRw+p+fL4WrxSK5nMYIakTCC
+# Go0CAQEwcTBaMQswCQYDVQQGEwJVUzEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBv
 # cmF0aW9uMSswKQYDVQQDEyJNaWNyb3NvZnQgSUQgVmVyaWZpZWQgQ1MgRU9DIENB
 # IDA0AhMzAAC99TK+FBrpFtcPAAAAAL31MA0GCWCGSAFlAwQCAQUAoF4wEAYKKwYB
 # BAGCNwIBDDECMAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwLwYJKoZIhvcN
-# AQkEMSIEIOU1tOiyCWcZIsOwQI4FBp7wAOZ1DfQ8a0JoUOPDjRBoMA0GCSqGSIb3
-# DQEBAQUABIIBgGl9fp4Ot7WHfA/Pgjn6QTNhsBreaIKasd/4BvJv4bgEq4VC3R5s
-# EmcHchYD8Lf2tToP5wq7J+wVnlitt5e1Vf1LJdFlXvqlL76gZz5cejofT4erqNCI
-# Hufe01DPTiuHCPcqRQk9Q/oPueKn5Ep8WQdvA6h2ofV5OMgAPr7f+PCuIqhV4LaB
-# QzHNFGy0fSQ4SD5XpTMS+GzHGXzsjVWV6IPaS0QMkoE7hR3tCtN6emw2UtUAENfk
-# RBqKQgIFdV8YxkChW3blRh789zOfQd9VC/x9q4iKhSPi1t/9+6ax0D8PgasstpAi
-# SMGto/VCXdjkPCUdHan0fTNbg7gJw9RAG2y4HptnLpbp58xbdsSxqcxwApGr/Ij7
-# o1hFSGne5GHBAy+vDu1O4kvN9xQZIJBi/MobgtjSxRAvHlSWdtuGwihobh0S18y7
-# EK50GeJ1Ydd5p4m67lPBHlO+GoBtG4sqkVZTyU4xkLx9lVSJQlVys1fzApEsAgxD
-# JtRqNfudILLv5aGCGBQwghgQBgorBgEEAYI3AwMBMYIYADCCF/wGCSqGSIb3DQEH
-# AqCCF+0wghfpAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFiBgsqhkiG9w0BCRABBKCC
-# AVEEggFNMIIBSQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCD++A7/
-# B/6fz/6PlgEgxKloVpDU5X3VWmWKNHHJpOPrkAIGaeiBCTqbGBMyMDI2MDUwNTA0
-# MDcwMS40MDZaMASAAgH0oIHhpIHeMIHbMQswCQYDVQQGEwJVUzETMBEGA1UECBMK
+# AQkEMSIEILw4sDrOO/pScYqP0CFTwy+vKsVH3PzavSW2V/nohCYtMA0GCSqGSIb3
+# DQEBAQUABIIBgJEg0z/c24Pk7EFtso56+CVZsH1bd8Z3zhkQ40xg/PnqghjAox7O
+# NRCo1DHTj9w/1AOGZCCPaQjwRElUm0mSXLvuqU0HEYlBO63xundXaa+loFKvsOCp
+# YPpzsJ84mOVSd9cnh+ngmJRwyZJCrPsZycJfHxIgeToeCBwCCSkOhxOgVoKdL07Q
+# +iDvSZd+HYgk9zfxLjp496CNNYeqGYHF+sGrnwjpCFTqhfxsMh+e4zreILfBQH9w
+# UtAiMuATJ9U9qk/xkbuZL8SfBNS/R3KFtsAQIFN83ElOw6nyHXVJnila+t1gp2Oj
+# yjVfjxzZxA/bukRqO3V32JIYZkUcfYaECzbbZ12tRijt4e3TBzQXMQ9yii3cD4rF
+# 3/47DmYpgXCwI76gLu203C8vfAOfXASHs2V986m/rpSwrUmcznBtgZSMA8qRSX9w
+# /IT4F7qV/xH0eMuId3j5fWxjbLfcRbN2zkC0cKvE6Py0lol4UpbvoHog7mXeuBoQ
+# b3YUhEhbAWYlrqGCGBEwghgNBgorBgEEAYI3AwMBMYIX/TCCF/kGCSqGSIb3DQEH
+# AqCCF+owghfmAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFiBgsqhkiG9w0BCRABBKCC
+# AVEEggFNMIIBSQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCAP3E09
+# 72tku5Z8B7GRZz8MyZD0lpt4GVZkM/ldpF9fIgIGaeddg+sHGBMyMDI2MDUwNTA0
+# MDY1OC45ODNaMASAAgH0oIHhpIHeMIHbMQswCQYDVQQGEwJVUzETMBEGA1UECBMK
 # V2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0
 # IENvcnBvcmF0aW9uMSUwIwYDVQQLExxNaWNyb3NvZnQgQW1lcmljYSBPcGVyYXRp
-# b25zMScwJQYDVQQLEx5uU2hpZWxkIFRTUyBFU046N0QwMC0wNUUwLUQ5NDcxNTAz
+# b25zMScwJQYDVQQLEx5uU2hpZWxkIFRTUyBFU046QTUwMC0wNUUwLUQ5NDcxNTAz
 # BgNVBAMTLE1pY3Jvc29mdCBQdWJsaWMgUlNBIFRpbWUgU3RhbXBpbmcgQXV0aG9y
 # aXR5oIIPITCCB4IwggVqoAMCAQICEzMAAAAF5c8P/2YuyYcAAAAAAAUwDQYJKoZI
 # hvcNAQEMBQAwdzELMAkGA1UEBhMCVVMxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jw
@@ -310,27 +325,27 @@ exit 0
 # nFOTgyEX8qBpefQbF0fx6URrYiarjmBprwP6ZObwtZXJ23jK3Fg/9uqM3j0P01nz
 # VygTppBabzxPAh/hHhhls6kwo3QLJ6No803jUsZcd4JQxiYHHc+Q/wAMcPUnYKv/
 # q2O444LO1+n6j01z5mggCSlRwD9faBIySAcA9S8h22hIAcRQqIGEjolCK9F6nK9Z
-# yX4lhthsGHumaABdWzCCB5cwggV/oAMCAQICEzMAAABV2d1pJij5+OIAAAAAAFUw
+# yX4lhthsGHumaABdWzCCB5cwggV/oAMCAQICEzMAAABWfo+dWAiO6WAAAAAAAFYw
 # DQYJKoZIhvcNAQEMBQAwYTELMAkGA1UEBhMCVVMxHjAcBgNVBAoTFU1pY3Jvc29m
 # dCBDb3Jwb3JhdGlvbjEyMDAGA1UEAxMpTWljcm9zb2Z0IFB1YmxpYyBSU0EgVGlt
-# ZXN0YW1waW5nIENBIDIwMjAwHhcNMjUxMDIzMjA0NjQ5WhcNMjYxMDIyMjA0NjQ5
+# ZXN0YW1waW5nIENBIDIwMjAwHhcNMjUxMDIzMjA0NjUxWhcNMjYxMDIyMjA0NjUx
 # WjCB2zELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcT
 # B1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjElMCMGA1UE
 # CxMcTWljcm9zb2Z0IEFtZXJpY2EgT3BlcmF0aW9uczEnMCUGA1UECxMeblNoaWVs
-# ZCBUU1MgRVNOOjdEMDAtMDVFMC1EOTQ3MTUwMwYDVQQDEyxNaWNyb3NvZnQgUHVi
+# ZCBUU1MgRVNOOkE1MDAtMDVFMC1EOTQ3MTUwMwYDVQQDEyxNaWNyb3NvZnQgUHVi
 # bGljIFJTQSBUaW1lIFN0YW1waW5nIEF1dGhvcml0eTCCAiIwDQYJKoZIhvcNAQEB
-# BQADggIPADCCAgoCggIBAL25H5IeWUiz9DAlFmn2sPymaFWbvYkMfK+ScIWb3a1I
-# vOlIwghUDjY0Gp6yMRhfYURiGS0GedIB6ywvuH6VBCX3+bdOFcAclgtv21jrpOjZ
-# mk4fSaT2Q3BszUfeUJa8o3xI7ZfoMY9dszTxHQAz6ZVX87fHGEVhQcfxW33IdPJO
-# j/ae419qtYxT21MVmCfsTshgtWioQxmOW/vMC9/b+qgtBxSMf798vm3qfmhF6KCv
-# FaHlivrM32hY16PGE3L0PFC+LM7vRxU7mTb+r76CeybvqOWk4+dbKYftPhV1t/E5
-# S/6wwXeYmu/Y7JC7Tnh2w45G5Y4pcM3oHMb/YuPRdOWa0v+RC2QgmNVWqjuxDiyl
-# WscXQDuaMtb29AcdGUVV9ZsRY2M2sthAtOdZOshiR5ufMtaHtiCkWv0jNfgUxrHu
-# rxzYuUNneWZ6EfQDgFAw8CSCKkSOK2c9jEop4ddVq10xvbqxdrqMneVXvvIcXrPQ
-# AXj9j2ECpV2EwMb3Wnmpw00P78JpzPsk3Fs61ZvOGd/F1RcOBu6f2TWdp7HL7+rq
-# 7tgHr13MldbfIWu4lpoYYE1gTQa1Yrg5XN4j7zs9klT2z3qocmPzV8DWQgIHNh+a
-# Ts7bujMEMQyI7Xt1zPxZCgcR6H0tmmzU/9BxvsWbRalCQ2sYGyWupTdc4e7KY7kP
-# AgMBAAGjggHLMIIBxzAdBgNVHQ4EFgQUVgRfEG3cCAPwyL+pyRbKwdesZbYwHwYD
+# BQADggIPADCCAgoCggIBALSln5v7pdNu/3fEZW/DJ/4NEFL7y6mNlbMt7SPFNrRU
+# rKU2aJmTg9wR0/C5Efka4TCYG9VYwChTcrGivXC0l4nzxkiAazwoLPT+MtuJayRJ
+# q1ekOc+AZqjISD62YRL2Z1qQkuBzu42Enov58Zgu/9RK/peS4Nz5ksW/HdiFXAEc
+# UsNQeJsQelyNJ5HpfcGtXWG9sHxqaH62hZsWTsU/XjYbeCx9EQUlbnm2umTaY0v9
+# ILX5u6oiIsj+qej0c002zJ1arB51f3f61tMx8fkPkDWecFKipk2SQfYVPOd/tqV+
+# aw3yt9rjWPf1gTgJs26oKRHUJG4jGr1DMlA0oZsnCL4B3UJ0ttO7E4/DPpCS97Tn
+# WoT7j6jMLGggoHX8MEMdDvUynuxUr2wBGLNQJ5XQpfyhxmQjlb1Dao8i9dCS3tP/
+# hg/f8p6lxlhaVzo2rp72f3CkToYzeDOXuscdG9poqnD4ouP4otmYXimpZSRE+wip
+# aRUobN8MoOhf36I0MULz521g+DcsepYY1o8JqC3MesNRUgrWrywpct9wS0UpU1OK
+# ilMWmvHe2DexKqZ/VztEmNLpjryhV61h+68ZfvYmonIrXZ005LAJ0Y73pHSk95YO
+# 5UTH5n2VPL1zYjdFGCc0/RI6o0ZtLjf4dKF8T4TXz2KnhW8j1xhsc2mFM+s8d6k3
+# AgMBAAGjggHLMIIBxzAdBgNVHQ4EFgQUvrYz8rurWf4eRrMi78s9R/hTSFowHwYD
 # VR0jBBgwFoAUa2koOjUvSGNAz3vYr0npPtk92yEwbAYDVR0fBGUwYzBhoF+gXYZb
 # aHR0cDovL3d3dy5taWNyb3NvZnQuY29tL3BraW9wcy9jcmwvTWljcm9zb2Z0JTIw
 # UHVibGljJTIwUlNBJTIwVGltZXN0YW1waW5nJTIwQ0ElMjAyMDIwLmNybDB5Bggr
@@ -340,54 +355,54 @@ exit 0
 # MAoGCCsGAQUFBwMIMA4GA1UdDwEB/wQEAwIHgDBmBgNVHSAEXzBdMFEGDCsGAQQB
 # gjdMg30BATBBMD8GCCsGAQUFBwIBFjNodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20v
 # cGtpb3BzL0RvY3MvUmVwb3NpdG9yeS5odG0wCAYGZ4EMAQQCMA0GCSqGSIb3DQEB
-# DAUAA4ICAQBSHuGSVHvalCnFnlsqXIQefH1xP2SFr9g+Vz+f5P7QeywjfQb5jUlS
-# md1XnJUDPe/MHxL7r3TEElL+mNtG6CDPAytStSFPXD9tTBtBMYh8Wqo64pH9qm36
-# 1yIqeBH979mzWCkMQsTd0nM6dUl9B+7qiti+ToXwxIl39eYqLuYYfhD2mqqePXMz
-# UKSQzkf73yYIVHP6nLJQz4aAmaWcfG9jg78sBkDV8KpW7JgktuLhphJEN1B+SVHj
-# enPdcmrFXIUu/K4jK5ukfWaQIjuaXzSjBlNjC5tQN6adPfA3GxUwHPeR4ekL5If/
-# 9vBf13tmzBW+gy+0sNGTveb9IL9GU8iX8UvywsX62nhCCPRUhTigDBKdczRUrNrn
-# tBhowbfchBDFML8avRMRc9Gmc2JvIryX336SFQ51//q1UU2HMSJEMhWLJSIWJVhf
-# UowsOa+PampIzETYfFvTu2mqKJUlWZXkGYxrdCvCczJcqeoadpW1ul6kcdnDh228
-# SQ8ZhDc6IRlM4iNd5SNoNgX+aom3wuGyjUaSaPZWxPB1G2NKiYhPLt0lPHg0Gskj
-# 1zhISY8UQkMMDr3o2JgRuT+wnJEDQUp55ddvhSkSoD6I9DL/s+TjIY/c9jLaW5xy
-# wJHqdKHUApRMsghv7kebSua1upmR+TquelFktDSOjVdSRkuya4uoxTGCB0YwggdC
+# DAUAA4ICAQAOA6gFxLDtuo/y2uxYJ/0In4rfMbmXpKmee/mHvrB/4UU2xBIxmK2Y
+# LKsEf5VFHyghaW2RfJrGmT0CTkeGGFBFPF8oy65/GNYwkpqMYfZe7VokqHPyRQcN
+# +eiQJsxhsXgQNhFksUbk69QLmXup2GjfP8LRZIh3LPIDGncVwbOg8VYcruWJ4Sz0
+# JH7pipt5RX7cBO6Ynle39ZbJJpYLAugHkhgsxj2VIAr3B+U7/0Hvc+2yCJkg90rs
+# 4TiMGj/nikE2H+u04n8iSpFkEnRn0wOinLuNZPCweqDyvjC5NY28cSucD6i0i+ts
+# YytOEgVxxCUhJ7BbdM8VpMT/5YHo9Q8alJ5q2BHZMb8ykhyAKhVkmbpf+YSPrycb
+# xT4bDUARJOHErpQ5CUKXHVYv4Jn/5hxTmIQwY7GtebOC/trAYpd11f0/EYkeukPM
+# WL0y0VsXdnVbKzqAsJ7FOFiHogtCYpwr9VixxIe0Ms6/UUq+JCiS1naTWC4YI5KI
+# 05hJAIxTu++Ld8Qe3p27yBdBjrFdfcZwlM6vRBisrdIDLmqYSpTYyfmk6Y1jGQxq
+# PhjirJ6fdx5n7ZpdEsqdxffjN8vsuliRlGaCGSattu4w44xJ3baVK4fQXT3VSH1S
+# Q/wLvNUc4dOVBwIr6K0NzrPDxCxyIIjnfU1s23YJhs3CC7f3XVUBETGCB0Mwggc/
 # AgEBMHgwYTELMAkGA1UEBhMCVVMxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3Jh
 # dGlvbjEyMDAGA1UEAxMpTWljcm9zb2Z0IFB1YmxpYyBSU0EgVGltZXN0YW1waW5n
-# IENBIDIwMjACEzMAAABV2d1pJij5+OIAAAAAAFUwDQYJYIZIAWUDBAIBBQCgggSf
+# IENBIDIwMjACEzMAAABWfo+dWAiO6WAAAAAAAFYwDQYJYIZIAWUDBAIBBQCgggSc
 # MBEGCyqGSIb3DQEJEAIPMQIFADAaBgkqhkiG9w0BCQMxDQYLKoZIhvcNAQkQAQQw
-# HAYJKoZIhvcNAQkFMQ8XDTI2MDUwNTA0MDcwMVowLwYJKoZIhvcNAQkEMSIEINBu
-# /kZEkM+pFuhJd0r5PodRWsvmPfHbO3ZxNkiVtUUvMIG5BgsqhkiG9w0BCRACLzGB
-# qTCBpjCBozCBoAQg2Lk8l2SGYru/ff7+D2qrJnkswcYdK6pGKu7GGGr4/s0wfDBl
+# HAYJKoZIhvcNAQkFMQ8XDTI2MDUwNTA0MDY1OFowLwYJKoZIhvcNAQkEMSIEIPog
+# piAb8Zzp0/ClvKoDHQqQ//vmQC2n1HaeuAygzFOgMIG5BgsqhkiG9w0BCRACLzGB
+# qTCBpjCBozCBoAQgtgwzJU2k4/CVd4k4OV56XuAkh+tNeN2fl/aOTQYDDKgwfDBl
 # pGMwYTELMAkGA1UEBhMCVVMxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlv
 # bjEyMDAGA1UEAxMpTWljcm9zb2Z0IFB1YmxpYyBSU0EgVGltZXN0YW1waW5nIENB
-# IDIwMjACEzMAAABV2d1pJij5+OIAAAAAAFUwggNhBgsqhkiG9w0BCRACEjGCA1Aw
-# ggNMoYIDSDCCA0QwggIsAgEBMIIBCaGB4aSB3jCB2zELMAkGA1UEBhMCVVMxEzAR
+# IDIwMjACEzMAAABWfo+dWAiO6WAAAAAAAFYwggNeBgsqhkiG9w0BCRACEjGCA00w
+# ggNJoYIDRTCCA0EwggIpAgEBMIIBCaGB4aSB3jCB2zELMAkGA1UEBhMCVVMxEzAR
 # BgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1p
 # Y3Jvc29mdCBDb3Jwb3JhdGlvbjElMCMGA1UECxMcTWljcm9zb2Z0IEFtZXJpY2Eg
-# T3BlcmF0aW9uczEnMCUGA1UECxMeblNoaWVsZCBUU1MgRVNOOjdEMDAtMDVFMC1E
+# T3BlcmF0aW9uczEnMCUGA1UECxMeblNoaWVsZCBUU1MgRVNOOkE1MDAtMDVFMC1E
 # OTQ3MTUwMwYDVQQDEyxNaWNyb3NvZnQgUHVibGljIFJTQSBUaW1lIFN0YW1waW5n
-# IEF1dGhvcml0eaIjCgEBMAcGBSsOAwIaAxUAHTtUAYJlv7bgWVeRBo4X7FeHDeqg
+# IEF1dGhvcml0eaIjCgEBMAcGBSsOAwIaAxUA/3P3KRUqkFmAXl4IMkSdmW72BBGg
 # ZzBlpGMwYTELMAkGA1UEBhMCVVMxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3Jh
 # dGlvbjEyMDAGA1UEAxMpTWljcm9zb2Z0IFB1YmxpYyBSU0EgVGltZXN0YW1waW5n
-# IENBIDIwMjAwDQYJKoZIhvcNAQELBQACBQDto3owMCIYDzIwMjYwNTA0MjAwNDAw
-# WhgPMjAyNjA1MDUyMDA0MDBaMHcwPQYKKwYBBAGEWQoEATEvMC0wCgIFAO2jejAC
-# AQAwCgIBAAICJJgCAf8wBwIBAAICElkwCgIFAO2ky7ACAQAwNgYKKwYBBAGEWQoE
-# AjEoMCYwDAYKKwYBBAGEWQoDAqAKMAgCAQACAwehIKEKMAgCAQACAwGGoDANBgkq
-# hkiG9w0BAQsFAAOCAQEADjsCDNm++/UIJi4YWRgGRz1tJ4pB/TONbfPQvotsrG40
-# v9LxZlmf20/Lu3FXHGtxENyCkhnsptiQ0s2s1E8vSYwpKCLPjITsA7RGXcAnSSA9
-# SKCz6bmfnktfMjvJ8FwQj+uec39Z9pDQCUBqbDxHEAE7ELfR22XjxMOFYzvJnC0g
-# ZIJKaP4H7vjgss7f/0+PYnfgqssSaQ4YRioeT+3Hqnp9bH8hczTI4Jednb7Sm5qL
-# kYlRIAourHr0W0f1eHWouCQzM+xLAKkOkwzNmRB07A4PkpYkYVUUOvmz1/XeocEb
-# NKRF/Hc2TlDTABTb81VjG/BhLgL3dxO0aRT3v7y1RzANBgkqhkiG9w0BAQEFAASC
-# AgABnP+NVD0HrvXt4QQ3OKZgn3FD3FJkEZGue6SKXPVUocdzOs/6yGC7ZffclmO9
-# /1S/m1GqomMt+ZQ0DB9OXhNySH2SMpjuKqn3/4T3ZZ28tqrg5xej1DuHwotJKaCU
-# L21efsaEqSupYQZTujwur567k2UeS/4wjyDxnNI/zwjiAGTnw0GBu2n+lT9PzQmY
-# gqH78m0KDAbwnyuN4RxAJff/Jbny2/speKiz1kHKvmG3qjHRBA7D81XCnKz4BuxO
-# +J+n8xBreg06F7PkikZ3WUg5po/urWlXsd/hbvzechAsocBGg8hjHX/oINYbtcbH
-# i/nOTrIeWq/Wbs6HdXneESOCDO2i+K4JiPrHOJNx/RHJv28Eqv+MSh0xap5yLp5O
-# OOCRKG2ZFgqiT2fS21AacXL+QYUwexpBLDaOGAxxubt9VuNfF4QNveWHMSXKpZbC
-# nsXyBgTlZCPUKPzJPAQBfVgRLBa+mRMCkJO3FhMyDrqqrWmIoTaGXRtRIm0K344S
-# WkdeeLw0UvGhP8p1dObDQ57c5W4YILQxy38OiUK2d1cTWj/r4zNwquLWe3vLlozH
-# xuK5uiz7xgEDXi29I4q4jQ5HNzfso+NwFMMYrwrA5pGxu0b5KTY4lfkRr+fstH9F
-# K5oyszq8V30Tw7bL40gNyMtYYMT5dmLSHf4q0Re3l39D4A==
+# IENBIDIwMjAwDQYJKoZIhvcNAQELBQACBQDto6goMCIYDzIwMjYwNTA0MjMyMDA4
+# WhgPMjAyNjA1MDUyMzIwMDhaMHQwOgYKKwYBBAGEWQoEATEsMCowCgIFAO2jqCgC
+# AQAwBwIBAAICB30wBwIBAAICEokwCgIFAO2k+agCAQAwNgYKKwYBBAGEWQoEAjEo
+# MCYwDAYKKwYBBAGEWQoDAqAKMAgCAQACAwehIKEKMAgCAQACAwGGoDANBgkqhkiG
+# 9w0BAQsFAAOCAQEAEzByvTOJrwP8w1D9HOH0NG5oV3CXyIZZZH1i8aHHp7jjHxzV
+# 6kYGtYMLKluck7X/gBZ7T+1oo61FCcszVg07TbJOem/HTHAi+EJnVEJxYY9hg3/3
+# 01gGol5k72WdcPhBU9QPsOVH9ea7jXqmYJCjOcfXnuoCwscuyzWR2rDCmbMWcYz6
+# 0+NLarjSOGRnc6kxRb1X5gfZrflgtE7lF/cls9uNuNvDtGG6TjxGA9UNgLXuM0MH
+# SjyayuTl+k8tDiydj+o0WTKKcGT0P3OMZ1d8FmuqIfZfg0izkqt2MJW91qQhidrr
+# DnzIdQAki5rSligaq9OonqO9zIxl0TyQfiEULDANBgkqhkiG9w0BAQEFAASCAgB6
+# lRed6SdEp50m1QYJAao6bU1TAna6OhlFQ2xTqF7XlxOqoJ1GpwCbHektbQWuzw26
+# EwON+Lp9Q1Bu/OwkmawsJLlO0cwunxTIEo9PV55deQQdyOFwI2glkBS6O55owdwQ
+# kwNHJnKfHFR/y3u1+7Z95vpCFcB2XhyM8XbrNPVGi6rOs70PZp5PuXhm0URkwLXI
+# MDtYdyqxQvv8bgB9OqcLTcbOuO56L0QPRwiU/wDkhh/psRdhRNdfpmrDLdFtdAVi
+# KPC9JWHaY8wK81DvYeb/81mvjiVWtAs79lrMGq8r/7Y+Dl62AnGYe7NfgHf+D3V7
+# 8s+WC4JPIdwMryQiqqQ/xzRyzGaAiGJVNa4BokZ2RTa29n5hsdY9qyMgbfu/aA1G
+# YEb+rZ06pPB6RIcc+Kq8D3E5vPxTGop16JIzBFQoV4Vljr55jWnCPDl5LTjgWkFD
+# 4Dfmh+K0PEBniw4QXQZYtfWVBA6wmMpuURyDJYS2irwCs3UMuBxYchbKo3RAGTYs
+# qNB8prIjwuqXTed/+NUh3hIhwlLLl+b2yv4HrV0/m7gk8uzjWneCkYrTylmt5by3
+# RgC3vHqKGvXRr6tcvREoa00JMxUL9CX4kjCUMFkkED4Ed1ZKrN+6l+gYCd0JYrXR
+# 0S6i2KZJrfX9ucGtB7W5DbSUSyEbqXJtM16bSOUNzg==
 # SIG # End signature block

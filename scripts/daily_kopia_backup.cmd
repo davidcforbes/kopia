@@ -96,6 +96,19 @@ if not defined KOPIA_PASSWORD (
 )
 echo %DATE% %TIME% — [preflight] KOPIA_PASSWORD resolved from DPAPI vault >> "%LOG%"
 
+REM ---- Stall guard (epic kopia-bcp.3) ----
+REM Watchdog polls heartbeat.log every 30s; kills our kopia children if the
+REM upstream server's heartbeat goes stale (default 180s), so a server hang
+REM fails this wrapper fast instead of waiting for the 08:00 watchdog.
+REM Watchdog exits on its own when this wrapper exits.
+for /f %%P in ('"%PS_BIN%" -NoProfile -Command "(Get-WmiObject Win32_Process -Filter \"ProcessId=$PID\").ParentProcessId"') do set WRAPPER_PID=%%P
+if not defined WRAPPER_PID (
+    echo %DATE% %TIME% — WARNING: could not resolve wrapper PID; stall guard not started >> "%LOG%"
+) else (
+    echo %DATE% %TIME% — [stall-guard] launching watchdog ^(wrapper PID=%WRAPPER_PID%^) >> "%LOG%"
+    start /B "" "%PS_BIN%" -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\heartbeat_watchdog.ps1" -WrapperPid %WRAPPER_PID%
+)
+
 REM ---- Preflight: check if wbadmin is still running ----
 echo %DATE% %TIME% — [preflight] checking for active wbadmin >> "%LOG%"
 tasklist /fi "imagename eq wbengine.exe" /nh 2>nul | findstr /i "wbengine" >nul
