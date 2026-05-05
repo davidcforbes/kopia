@@ -1,5 +1,13 @@
 {
   "Endpoint": "https://eus.codesigning.azure.net",
   "CodeSigningAccountName": "famcodesign",
-  "CertificateProfileName": "activity-journal"
+  "CertificateProfileName": "activity-journal",
+  "ExcludeCredentials": [
+    "environmentcredential",
+    "workloadidentitycredential",
+    "managedidentitycredential",
+    "sharedtokencachecredential",
+    "visualstudiocredential",
+    "visualstudiocodecredential"
+  ]
 }
