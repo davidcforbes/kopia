@@ -9,7 +9,12 @@ REM ============================================================
 setlocal enabledelayedexpansion
 
 set KOPIA_BIN=C:\Users\david\go\bin\kopia.exe
-set KOPIA_CFG=--config-file=C:\Users\david\AppData\Roaming\kopia\repository.config
+REM Wrapper-specific cache directory (epic kopia-0m5): keeps the wrapper's
+REM client cache disjoint from KopiaUI's bundled-server cache so the two
+REM don't race on temp-file renames inside server-contents/. Auto-created
+REM on first use; safe to delete to force a re-fetch.
+set KOPIA_CACHE=C:\Users\david\AppData\Local\kopia-wrapper-cache
+set KOPIA_CFG=--config-file=C:\Users\david\AppData\Roaming\kopia\repository.config --cache-directory=%KOPIA_CACHE%
 set KOPIA_CFG_PATH=C:\Users\david\AppData\Roaming\kopia\repository.config
 set KOPIA_REPO=D:\KopiaRepo
 set LOG=C:\dev\kopia\logs\daily_kopia.log
@@ -101,7 +106,11 @@ REM Watchdog polls heartbeat.log every 30s; kills our kopia children if the
 REM upstream server's heartbeat goes stale (default 180s), so a server hang
 REM fails this wrapper fast instead of waiting for the 08:00 watchdog.
 REM Watchdog exits on its own when this wrapper exits.
-for /f %%P in ('"%PS_BIN%" -NoProfile -Command "(Get-WmiObject Win32_Process -Filter \"ProcessId=$PID\").ParentProcessId"') do set WRAPPER_PID=%%P
+REM
+REM PID resolution via get_parent_pid.ps1 (epic kopia-i1p): the previous
+REM nested-quoted `for /f` PS one-liner produced empty output under S4U
+REM elevated context. Calling a signed -File script sidesteps cmd-quoting.
+for /f %%P in ('"%PS_BIN%" -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\get_parent_pid.ps1"') do set WRAPPER_PID=%%P
 if not defined WRAPPER_PID (
     echo %DATE% %TIME% — WARNING: could not resolve wrapper PID; stall guard not started >> "%LOG%"
 ) else (
