@@ -11,6 +11,18 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Ensure the dlib's AzureCliCredential can find 'az'. When sign-all is invoked
+# from a non-interactive Make session (Bash → powershell.exe child), the PATH
+# may not include the az CLI install dir even when an interactive PS session
+# would have it. Prepend the standard install dir so the dlib's PATH-based
+# az lookup succeeds. (Without this: 'AzureCliCredential authentication failed:
+# Azure CLI not installed' even though Phase 1 diagnose just succeeded —
+# diagnose has its own fallback path; the dlib doesn't.)
+$azDir = 'C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin'
+if ((Test-Path $azDir) -and ($env:Path -notlike "*$azDir*")) {
+    $env:Path = "$azDir;$env:Path"
+}
+
 # Phase 1 preflight (skippable for emergency only).
 # Always invoke via pwsh.exe — diagnose-signing.ps1 uses the ?? operator (PS 7+).
 if (-not $env:SKIP_DIAGNOSE) {
