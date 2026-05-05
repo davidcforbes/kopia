@@ -11,6 +11,20 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Phase 1 preflight (skippable for emergency only).
+# Always invoke via pwsh.exe — diagnose-signing.ps1 uses the ?? operator (PS 7+).
+if (-not $env:SKIP_DIAGNOSE) {
+    $diagnoseScript = Join-Path $PSScriptRoot '..\cicd\diagnose-signing.ps1'
+    & pwsh.exe -NoProfile -ExecutionPolicy Bypass -File $diagnoseScript
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "diagnose-signing.ps1 reported failures (exit $LASTEXITCODE) — aborting sign-all." -ForegroundColor Red
+        Write-Host "  Set `$env:SKIP_DIAGNOSE = '1' to bypass (not recommended)." -ForegroundColor Yellow
+        exit 1
+    }
+} else {
+    Write-Host "[sign-all] SKIP_DIAGNOSE=1 — bypassing Phase 1 preflight (not recommended)." -ForegroundColor Yellow
+}
+
 $repo     = 'C:\dev\kopia'
 $metadata = Join-Path $repo 'signing\metadata.json'
 if (-not (Test-Path $metadata)) { throw "metadata.json not found at $metadata" }
