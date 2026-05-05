@@ -8,6 +8,9 @@
 $script:CicdRoot     = (Resolve-Path "$PSScriptRoot\..").Path
 $script:StateFile    = Join-Path $CicdRoot '.last-deploy'
 
+# State is a pscustomobject (for dot-property access on top-level fields like
+# $state.verdict). state.phases is an [ordered] hashtable so phase insertion
+# order survives JSON round-trips.
 function Get-PipelineState {
     if (-not (Test-Path $script:StateFile)) {
         return [pscustomobject]@{
@@ -21,13 +24,19 @@ function Get-PipelineState {
     if ([string]::IsNullOrWhiteSpace($raw)) {
         return [pscustomobject]@{ runId = $null; trigger = $null; verdict = $null; phases = [ordered]@{} }
     }
-    return $raw | ConvertFrom-Json
+    try {
+        return $raw | ConvertFrom-Json
+    } catch {
+        throw "cicd/.last-deploy is corrupt: $($_.Exception.Message). Delete the file (or restore from backup) to continue."
+    }
 }
 
 function Set-PipelineState {
     param([Parameter(Mandatory)] $State)
     $json = $State | ConvertTo-Json -Depth 10
-    Set-Content -Path $script:StateFile -Value $json -Encoding UTF8
+    $tmp  = "$script:StateFile.tmp"
+    Set-Content -Path $tmp -Value $json -Encoding UTF8
+    Move-Item -Path $tmp -Destination $script:StateFile -Force
 }
 
 function Start-PhaseRun {
@@ -45,6 +54,18 @@ function Start-PhaseRun {
             phases  = [ordered]@{}
         }
     }
+    # Record a placeholder so a crash mid-phase still leaves a marker in the state file
+    $phases = [ordered]@{}
+    if ($state.phases) {
+        $state.phases.PSObject.Properties | ForEach-Object { $phases[$_.Name] = $_.Value }
+    }
+    $phases[$Phase] = [ordered]@{
+        status     = 'running'
+        durationMs = 0
+        message    = 'phase started'
+        timestamp  = Get-Date -Format 'yyyy-MM-ddTHH:mm:sszzz'
+    }
+    $state.phases = $phases
     Set-PipelineState $state
     return [pscustomobject]@{
         Phase     = $Phase
@@ -62,7 +83,7 @@ function Complete-PhaseRun {
     $state = Get-PipelineState
     $entry = [ordered]@{
         status      = $Status
-        durationMs  = [int]((Get-Date) - $Run.StartTime).TotalMilliseconds
+        durationMs  = [long]((Get-Date) - $Run.StartTime).TotalMilliseconds
         message     = $Message
         timestamp   = Get-Date -Format 'yyyy-MM-ddTHH:mm:sszzz'
     }
@@ -76,8 +97,9 @@ function Complete-PhaseRun {
     $phases[$Run.Phase] = $entry
     $state.phases = $phases
 
+    # Verdict is sticky: once any phase fails, the run verdict stays 'failure'
+    # regardless of subsequent phases. Set-RunVerdict is the only way to reach 'success'.
     if ($Status -eq 'failed') { $state.verdict = 'failure' }
-    elseif ($Status -eq 'ok' -and $state.verdict -eq 'in_progress') { $state.verdict = 'in_progress' }
 
     Set-PipelineState $state
 }
