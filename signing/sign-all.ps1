@@ -14,8 +14,15 @@ $ErrorActionPreference = 'Stop'
 # Phase 1 preflight (skippable for emergency only).
 # Always invoke via pwsh.exe — diagnose-signing.ps1 uses the ?? operator (PS 7+).
 if (-not $env:SKIP_DIAGNOSE) {
+    $pwshExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
+    if (-not $pwshExe) {
+        Write-Host "pwsh.exe (PowerShell 7+) required for diagnose-signing.ps1 (uses ?? operator)." -ForegroundColor Red
+        Write-Host "  Install via: winget install Microsoft.PowerShell" -ForegroundColor Yellow
+        Write-Host "  Or set `$env:SKIP_DIAGNOSE = '1' to bypass preflight (not recommended)." -ForegroundColor Yellow
+        exit 1
+    }
     $diagnoseScript = Join-Path $PSScriptRoot '..\cicd\diagnose-signing.ps1'
-    & pwsh.exe -NoProfile -ExecutionPolicy Bypass -File $diagnoseScript
+    & $pwshExe -NoProfile -ExecutionPolicy Bypass -File $diagnoseScript
     if ($LASTEXITCODE -ne 0) {
         Write-Host "diagnose-signing.ps1 reported failures (exit $LASTEXITCODE) — aborting sign-all." -ForegroundColor Red
         Write-Host "  Set `$env:SKIP_DIAGNOSE = '1' to bypass (not recommended)." -ForegroundColor Yellow

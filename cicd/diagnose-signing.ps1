@@ -17,6 +17,8 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\lib\pipeline-state.ps1"
 
 $run = Start-PhaseRun -Phase 'diagnose'
+
+try {
 $failures = @()
 $warnings = @()
 $repo = 'C:\dev\kopia'
@@ -40,7 +42,7 @@ try {
 try {
     $csproj = [xml](Get-Content (Join-Path $repo 'signing\dlib\dlib.csproj'))
     $pinned = ($csproj.Project.ItemGroup.PackageReference | Where-Object Include -eq 'Microsoft.Trusted.Signing.Client').Version
-    $idx = Invoke-RestMethod 'https://api.nuget.org/v3-flatcontainer/microsoft.trusted.signing.client/index.json' -ErrorAction Stop
+    $idx = Invoke-RestMethod 'https://api.nuget.org/v3-flatcontainer/microsoft.trusted.signing.client/index.json' -ErrorAction Stop -TimeoutSec 10
     $latest = $idx.versions[-1]
     if ($pinned -ne $latest) {
         $warnings += "dlib pinned at $pinned; NuGet latest is $latest"
@@ -63,7 +65,7 @@ try {
     while ($payloadB64.Length % 4 -ne 0) { $payloadB64 += '=' }
     $claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(
         $payloadB64.Replace('-','+').Replace('_','/'))) | ConvertFrom-Json
-    if ($claims.aud -ne 'https://codesigning.azure.net') {
+    if ($claims.aud.TrimEnd('/') -ne 'https://codesigning.azure.net') {
         throw "token audience mismatch: $($claims.aud)"
     }
     $expiresIn = ([DateTimeOffset]::FromUnixTimeSeconds($claims.exp).LocalDateTime - (Get-Date)).TotalMinutes
@@ -77,7 +79,7 @@ try {
 }
 
 # Check 4 — role assignment present
-if ($script:tokenOid) {
+if ($script:tokenOid -and $meta) {
     try {
         $scope = "/subscriptions/$($meta.SubscriptionId ?? '0dee2894-9caa-4e29-a059-6b241427c811')/resourceGroups/codesign/providers/Microsoft.CodeSigning/codeSigningAccounts/$($meta.CodeSigningAccountName)"
         $assignments = & $az role assignment list --assignee $script:tokenOid --scope $scope --include-inherited --query "[?roleDefinitionName=='Artifact Signing Certificate Profile Signer'].roleDefinitionName" -o tsv 2>&1
@@ -107,13 +109,15 @@ try {
         Select-Object -First 1
     if (-not $v4) { throw "no IPv4 address resolved for $epHost" }
     $tcpClient = [System.Net.Sockets.TcpClient]::new()
-    $iar = $tcpClient.BeginConnect($v4, 443, $null, $null)
-    if (-not $iar.AsyncWaitHandle.WaitOne(5000, $false)) {
-        $tcpClient.Close()
-        throw "TCP to ${epHost}:443 ($v4) timed out after 5s"
+    try {
+        $iar = $tcpClient.BeginConnect($v4, 443, $null, $null)
+        if (-not $iar.AsyncWaitHandle.WaitOne(5000, $false)) {
+            throw "TCP to ${epHost}:443 ($v4) timed out after 5s"
+        }
+        $tcpClient.EndConnect($iar)
+    } finally {
+        $tcpClient.Dispose()
     }
-    $tcpClient.EndConnect($iar)
-    $tcpClient.Close()
     Write-PhaseLog "  [ok] $epHost reachable (v4: $v4)" -Level ok
 } catch {
     $failures += "endpoint reachability: $($_.Exception.Message)"
@@ -121,12 +125,14 @@ try {
 }
 
 # Check 6 — sign API returns 400 on empty POST (proves auth+RBAC OK; isolates dlib drift)
-if ($script:tokenOid -and $rawToken) {
+if ($VerifyOnly) {
+    Write-PhaseLog "  [skip] sign API smoke probe (VerifyOnly mode)" -Level info
+} elseif ($script:tokenOid -and $rawToken -and $meta) {
     try {
         $url = "$($meta.Endpoint)/codesigningaccounts/$($meta.CodeSigningAccountName)/certificateprofiles/$($meta.CertificateProfileName)/sign?api-version=2024-06-15"
         $curl = (Get-Command curl.exe).Source
         # Single-quoted '%{http_code}' is preserved literally by PowerShell; passed verbatim to curl.
-        $resp = & $curl -4 -s -o NUL -w '%{http_code}' -X POST -H "Authorization: Bearer $rawToken" -H 'Content-Type: application/json' -d '{}' --max-time 15 $url 2>&1
+        $resp = & $curl -4 -s -o NUL -w '%{http_code}' -X POST -H "Authorization: Bearer $rawToken" -H 'Content-Type: application/json' -d '{}' --max-time 15 $url 2>$null
         if ($resp -eq '400') {
             Write-PhaseLog "  [ok] sign API smoke probe: HTTP 400 (auth+RBAC accepted, body rejected as expected)" -Level ok
         } elseif ($resp -eq '403') {
@@ -152,6 +158,10 @@ if ($bdCa) {
     Write-PhaseLog "  [ok] no MITM CA in trust store" -Level ok
 }
 
+# Clear the access token from session memory before exit.
+$rawToken = $null
+Remove-Variable -Name rawToken -ErrorAction SilentlyContinue
+
 # Verdict
 $message = if ($failures) {
     "FAIL: $($failures.Count) failure(s); $($warnings.Count) warning(s)"
@@ -171,4 +181,12 @@ if ($failures) {
     Write-PhaseLog "[diagnose] $message" -Level ok
     foreach ($w in $warnings) { Write-PhaseLog "  - $w" -Level warn }
     exit 0
+}
+} catch {
+    Write-PhaseLog "[diagnose] UNEXPECTED ERROR: $($_.Exception.Message)" -Level err
+    Write-PhaseLog "  $($_.ScriptStackTrace)" -Level err
+    try {
+        Complete-PhaseRun -Run $run -Status 'failed' -Message "unexpected error: $($_.Exception.Message)"
+    } catch {} # state lib itself might be broken
+    exit 2
 }
