@@ -77,6 +77,12 @@ type commandServerStart struct {
 
 	disableCSRFTokenChecks bool // disable CSRF token checks - used for development/debugging only
 
+	// Heartbeat (epic kopia-bcp): predictable proof-of-life signal so
+	// downstream monitors can detect a stalled server in minutes rather than
+	// hours. Default disabled to preserve upstream behavior.
+	heartbeatInterval time.Duration
+	heartbeatFile     string
+
 	sf  serverFlags
 	svc advancedAppServices
 	out textOutput
@@ -128,6 +134,9 @@ func (c *commandServerStart) setup(svc advancedAppServices, parent commandParent
 
 	cmd.Flag("kopiaui-notifications", "Enable notifications to be printed to stdout for KopiaUI").BoolVar(&c.kopiauiNotifications)
 
+	cmd.Flag("heartbeat-interval", "Emit a structured heartbeat line every interval (0 = disabled)").Default("0").DurationVar(&c.heartbeatInterval)
+	cmd.Flag("heartbeat-file", "Append heartbeat lines to this file (empty = stderr)").StringVar(&c.heartbeatFile)
+
 	c.sf.setup(svc, cmd)
 	c.co.setup(svc, cmd)
 	c.svc = svc
@@ -169,6 +178,9 @@ func (c *commandServerStart) serverStartOptions(ctx context.Context) (*server.Op
 
 		EnableErrorNotifications: c.svc.enableErrorNotifications(),
 		NotifyTemplateOptions:    c.svc.notificationTemplateOptions(),
+
+		HeartbeatInterval: c.heartbeatInterval,
+		HeartbeatFile:     c.heartbeatFile,
 	}, nil
 }
 
@@ -199,6 +211,10 @@ func (c *commandServerStart) run(ctx context.Context) (reterr error) {
 	if err != nil {
 		return errors.Wrap(err, "unable to initialize server")
 	}
+
+	// Start heartbeat goroutine before repo connect so we have proof-of-life
+	// even during a slow / failing initial connection.
+	srv.StartHeartbeatLoop(ctx, opts.HeartbeatInterval, opts.HeartbeatFile)
 
 	if err = c.initRepositoryPossiblyAsync(ctx, srv); err != nil {
 		return errors.Wrap(err, "unable to initialize repository")

@@ -874,6 +874,12 @@ type Options struct {
 	MinMaintenanceInterval   time.Duration
 	EnableErrorNotifications bool
 	NotifyTemplateOptions    notifytemplate.Options
+
+	// HeartbeatInterval, if > 0, enables a structured heartbeat line every
+	// interval. Default: disabled. See server_heartbeat.go.
+	HeartbeatInterval time.Duration
+	// HeartbeatFile is the path the heartbeat is appended to. Empty = stderr.
+	HeartbeatFile string
 }
 
 // InitRepositoryFunc is a function that attempts to connect to/open repository.
