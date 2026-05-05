@@ -4,6 +4,8 @@ Signs `kopia.exe` and the local backup helper `.ps1` scripts under [`../scripts/
 
 Daily backups (`\Backup\DailyKopiaSnapshotV2`) verify these signatures at preflight; nothing runs unsigned.
 
+> **For the full local CI/CD pipeline** — six phases including diagnose, deploy-artifacts, deploy-tasks, deploy-config, and smoke-test — see [`../cicd/README.md`](../cicd/README.md). This README covers the signing layer specifically.
+
 ## Files
 
 | File                       | Tracked? | Purpose                                                                |
@@ -34,8 +36,14 @@ Daily backups (`\Backup\DailyKopiaSnapshotV2`) verify these signatures at prefli
 
 ```bash
 # Edit Go source or any signed .ps1
-make release          # = install-noui + sign-all + verify-signatures + stamp .last-sign
-git push              # pre-push hook runs `make prepush-check`
+make release-and-deploy   # full chain — diagnose → release → deploy → smoke-test
+git push                  # pre-push hook runs `make prepush-check`
+```
+
+Or for the signing-only subset (no deploy phases):
+
+```bash
+make release              # = diagnose + install-noui + sign-all + verify-signatures + stamp
 ```
 
 For a `.ps1`-only edit (no Go rebuild needed):
