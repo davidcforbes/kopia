@@ -17,6 +17,7 @@ Makefile.local.mk
 signing/dlib/obj/
 signing/dlib/bin/
 signing/.last-sign
+cicd/.last-deploy
 .linterr.txt
 test_service_account.json
 id_kopia
