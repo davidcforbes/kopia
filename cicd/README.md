@@ -70,6 +70,15 @@ Phase 1 also runs as a preflight inside `make sign-all` (so any sign attempt —
 | **Config invalid** | corrupt `D:\KopiaServer\repository.config` JSON | Phase 5 reports `[FAIL] ... unexpected character` |
 | **Smoke-test conflict** | start `kopia server` then `make smoke-test` | Phase 6 refuses to run with `[FAIL] kopia already running (PID N)` |
 
+## Toast surveillance
+
+`cicd/toast-cicd-status.ps1` reads `cicd/.last-deploy` and emits a Windows toast under the existing `KopiaBackup.HealthCheck` AppId (clicking the toast opens `backup-monitor.exe` via the `kopiamonitor:` URL protocol). Two modes:
+
+- **`-Mode Inline`** — always emits PASS or FAIL. Runs as the final step of `make release-and-deploy` so the operator gets immediate feedback that the chain completed.
+- **`-Mode Surveillance`** — silent on fresh-and-green; emits ONLY on `verdict: failure` OR `runId` older than `-StaleHours` (default 24). Used by the daily `\Backup\KopiaCicdHealthCheck` scheduled task to surface drift even when no one's actively running the pipeline.
+
+The script requires Windows PowerShell 5.1 (NOT pwsh 7+) because of the WinRT type-loading idiom; existing toast emitters (`post_summary_toast.ps1`, `check_backup_health.ps1`) have the same constraint and the `Makefile` target invokes `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe` explicitly.
+
 ## Bypass mechanisms
 
 - **`git push --no-verify`** — skips the pre-push gate (existing).
