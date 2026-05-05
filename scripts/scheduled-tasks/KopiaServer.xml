@@ -6,7 +6,7 @@
 
     <Author>david</Author>
 
-    <Description>Long-running upstream kopia repository server. Spawns kopia.exe server bound to 127.0.0.1:51515 with a stable TLS cert, holding D:\KopiaRepo so all clients (KopiaUI, daily_kopia_backup.cmd) talk via REST. Created DISABLED â€” enable as part of the cutover (epic kopia-7s7).</Description>
+    <Description>Long-running upstream kopia repository server. Spawns kopia.exe server bound to 127.0.0.1:51515 with a stable TLS cert, holding D:\KopiaRepo so all clients (KopiaUI, daily_kopia_backup.cmd) talk via REST. Created DISABLED — enable as part of the cutover (epic kopia-7s7).</Description>
 
     <URI>\Backup\KopiaServer</URI>
 

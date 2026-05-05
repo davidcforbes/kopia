@@ -3,10 +3,35 @@
 # desired-state XMLs in scripts/scheduled-tasks/.
 #
 # For each .xml in scripts/scheduled-tasks/:
-#   - If task not registered: schtasks /create
-#   - If registered but XML differs: schtasks /delete + /create
-#   - If currently running: skip (don't disrupt active backups)
+#   - If task is currently Running: skip (don't disrupt active backups)
+#   - If task not registered or XML differs from desired: schtasks /create /f
+#     (atomic force-overwrite — keeps prior registration intact if /create
+#     fails on elevation requirement)
+#   - If registered XML matches desired: [ok] current
 # Idempotent: a no-drift run is fast and silent.
+#
+# IMPORTANT: The XMLs in scripts/scheduled-tasks/ are PER-HOST SNAPSHOTS.
+# They hardcode the user SID (S-1-5-21-...) and absolute paths
+# (C:\dev\kopia\scripts\...). They are committed for reproducibility on
+# THIS machine, not for portability. On a fresh host, regenerate them via:
+#   schtasks /query /xml /tn '\Backup\<name>' > scripts/scheduled-tasks/<name>.xml
+# (after registering each task once with the new host's SID/paths).
+#
+# Tasks with RunLevel=HighestAvailable (e.g., WbadminHealthCheck, KopiaServer)
+# require an elevated PowerShell session for schtasks /create /f to succeed.
+# A non-elevated invocation safely reports those as failed without modifying
+# state — the prior registration stays intact (atomic /create /f semantic).
+#
+# Iteration order: alphabetical via Get-ChildItem default. Tasks are
+# independent — no creation-order dependency exists today.
+#
+# Encoding-declaration quirk: the XMLs declare <?xml ... encoding="UTF-16"?>
+# but the bytes on disk are actually ASCII (no BOM). This is what schtasks
+# /query /xml emits, and — surprisingly — schtasks /create /xml only accepts
+# files with that exact declaration; switching it to "UTF-8" makes schtasks
+# reject the file with "ERROR: unable to switch the encoding". PowerShell's
+# [xml] cast is lenient enough to parse it either way, so we leave the
+# declaration alone and accept the lie. Don't "fix" it.
 
 [CmdletBinding()]
 param([switch]$VerifyOnly)
@@ -51,23 +76,21 @@ foreach ($file in Get-ChildItem $desiredDir -Filter '*.xml') {
 
     # Is it currently running?
     try {
-        $info = schtasks /query /tn $taskPath /v /fo csv 2>$null | Select-Object -Skip 1
-        if ($info) {
-            $statusField = ($info -split ',')[3] -replace '"', ''
-            if ($statusField -match 'Running') {
-                Write-PhaseLog "  [skip] $taskPath — currently Running, will reconcile next time" -Level warn
-                $skipped += "$taskPath (running)"
-                continue
-            }
+        $rows = schtasks /query /tn $taskPath /v /fo csv 2>$null | ConvertFrom-Csv
+        if ($rows | Where-Object { $_.Status -eq 'Running' }) {
+            Write-PhaseLog "  [skip] $taskPath — currently Running, will reconcile next time" -Level warn
+            $skipped += "$taskPath (running)"
+            continue
         }
-    } catch { }
+    } catch {
+        # I3: log instead of silently swallowing — schtasks missing or path
+        # syntax change in a future Windows would otherwise mask real failures.
+        Write-PhaseLog "  [warn] running-task probe failed for ${taskPath}: $($_.Exception.Message)" -Level warn
+    }
 
     # Compare to current registration
-    $registered = $null
-    schtasks /query /xml /tn $taskPath 2>$null | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        $registered = (schtasks /query /xml /tn $taskPath) -join "`n"
-    }
+    $registered = schtasks /query /xml /tn $taskPath 2>$null | Out-String
+    if ($LASTEXITCODE -ne 0) { $registered = $null }
 
     if ($registered -and (Normalize-Xml $registered) -eq (Normalize-Xml $desired)) {
         Write-PhaseLog "  [ok] $taskPath current" -Level ok
@@ -84,9 +107,10 @@ foreach ($file in Get-ChildItem $desiredDir -Filter '*.xml') {
         # /create /f is force-overwrite-existing; safer than /delete + /create which can
         # leave the task in a deleted-but-not-recreated state if /create fails (e.g., on
         # HighestAvailable tasks that require elevation).
-        schtasks /create /tn $taskPath /xml $file.FullName /f 2>&1 | Out-Null
+        $out = & schtasks /create /tn $taskPath /xml $file.FullName /f 2>&1
         if ($LASTEXITCODE -ne 0) {
-            throw "schtasks /create /f returned $LASTEXITCODE (likely needs an elevated shell for HighestAvailable tasks)"
+            $stderr = ($out | Out-String).Trim()
+            throw "schtasks /create /f returned ${LASTEXITCODE}: $stderr (likely needs an elevated PowerShell session for HighestAvailable tasks)"
         }
         if ($registered) {
             $updated += $taskPath; Write-PhaseLog "  [ok] updated $taskPath" -Level ok
