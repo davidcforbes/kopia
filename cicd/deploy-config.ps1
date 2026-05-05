@@ -3,6 +3,8 @@
 # Confirms each known config artifact is well-formed and protected.
 
 [CmdletBinding()]
+# -VerifyOnly: accepted for cross-phase invocation contract consistency;
+# this script is always read-only, so the switch has no effect.
 param([switch]$VerifyOnly)
 
 $ErrorActionPreference = 'Stop'
@@ -54,20 +56,43 @@ if (Test-Path $pwVault) {
         } else {
             Write-PhaseLog "  [ok] scripts/.kopia-pw.dat ACL owner-only" -Level ok
         }
-    } catch {
+    } catch [System.UnauthorizedAccessException], [System.Security.SecurityException] {
         # Get-Acl denied -> caller lacks READ_CONTROL on the file. This means
         # the ACL is *more* restrictive than owner-only, not less, so the file
         # cannot be exfiltrated (or its DACL inspected) by this account. Also
         # confirm content is unreadable to rule out an exotic ACL where DACL
         # is hidden but data is exposed.
         $contentReadable = $false
-        try { [void][System.IO.File]::ReadAllBytes($pwVault); $contentReadable = $true } catch {}
-        if ($contentReadable) {
-            $failures += "scripts/.kopia-pw.dat: ACL unreadable but content readable (anomalous DACL)"
-            Write-PhaseLog "  [FAIL] .kopia-pw.dat ACL unreadable AND content readable" -Level err
-        } else {
-            Write-PhaseLog "  [ok] scripts/.kopia-pw.dat locked down (ACL+content unreadable to current user)" -Level ok
+        $contentTransient = $false
+        try {
+            # Reads DPAPI ciphertext (not plaintext) — bytes are useless without the
+            # DPAPI keying material on this machine. Result is discarded via [void].
+            # Safe per SECRETS.md threat model.
+            [void][System.IO.File]::ReadAllBytes($pwVault); $contentReadable = $true
+        } catch [System.UnauthorizedAccessException], [System.Security.SecurityException] {
+            # Expected path: ACL genuinely denies read. The DACL+content unreadability
+            # is the contract for "locked down" — see comment above on data residency.
+            $contentReadable = $false
+        } catch {
+            # Transient I/O issue (file in use, AV mid-scan, network drive blip). Can't
+            # confidently assert "locked down" — surface as warning so a re-run will catch it.
+            $contentTransient = $true
+            $warnings += "scripts/.kopia-pw.dat: could not verify content unreadability (transient: $($_.Exception.GetType().Name) - $($_.Exception.Message))"
+            Write-PhaseLog "  [warn] scripts/.kopia-pw.dat: transient I/O — re-run to confirm" -Level warn
         }
+        if (-not $contentTransient) {
+            if ($contentReadable) {
+                $failures += "scripts/.kopia-pw.dat: ACL unreadable but content readable (anomalous DACL)"
+                Write-PhaseLog "  [FAIL] .kopia-pw.dat ACL unreadable AND content readable" -Level err
+            } else {
+                Write-PhaseLog "  [ok] scripts/.kopia-pw.dat locked down (ACL+content unreadable to current user)" -Level ok
+            }
+        }
+    } catch {
+        # Transient I/O issue from Get-Acl itself (rare — file in use, drive blip).
+        # Can't confidently assert "locked down" — surface as warning.
+        $warnings += "scripts/.kopia-pw.dat: could not verify DACL (transient: $($_.Exception.GetType().Name) - $($_.Exception.Message))"
+        Write-PhaseLog "  [warn] scripts/.kopia-pw.dat: transient I/O on Get-Acl — re-run to confirm" -Level warn
     }
 } else {
     $warnings += "scripts/.kopia-pw.dat absent (recreate via SECRETS.md procedure)"
