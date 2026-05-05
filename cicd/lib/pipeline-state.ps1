@@ -9,20 +9,23 @@ $script:CicdRoot     = (Resolve-Path "$PSScriptRoot\..").Path
 $script:StateFile    = Join-Path $CicdRoot '.last-deploy'
 
 # State is a pscustomobject (for dot-property access on top-level fields like
-# $state.verdict). state.phases is an [ordered] hashtable so phase insertion
-# order survives JSON round-trips.
+# $state.verdict). state.phases is also a pscustomobject so it serializes
+# cleanly with no IDictionary metadata leak (Count/Keys/Values/etc.) and
+# preserves phase insertion order across JSON round-trips. Local mutation
+# uses [ordered]@{} for ordered key add, then casts to [pscustomobject]
+# before assignment back into $state.phases.
 function Get-PipelineState {
     if (-not (Test-Path $script:StateFile)) {
         return [pscustomobject]@{
             runId   = $null
             trigger = $null
             verdict = $null
-            phases  = [ordered]@{}
+            phases  = [pscustomobject]@{}
         }
     }
     $raw = Get-Content $script:StateFile -Raw
     if ([string]::IsNullOrWhiteSpace($raw)) {
-        return [pscustomobject]@{ runId = $null; trigger = $null; verdict = $null; phases = [ordered]@{} }
+        return [pscustomobject]@{ runId = $null; trigger = $null; verdict = $null; phases = [pscustomobject]@{} }
     }
     try {
         return $raw | ConvertFrom-Json
@@ -51,7 +54,7 @@ function Start-PhaseRun {
             runId   = (Get-Date -Format 'yyyy-MM-ddTHH:mm:sszzz')
             trigger = $Trigger
             verdict = 'in_progress'
-            phases  = [ordered]@{}
+            phases  = [pscustomobject]@{}
         }
     }
     # Record a placeholder so a crash mid-phase still leaves a marker in the state file
@@ -65,7 +68,7 @@ function Start-PhaseRun {
         message    = 'phase started'
         timestamp  = Get-Date -Format 'yyyy-MM-ddTHH:mm:sszzz'
     }
-    $state.phases = $phases
+    $state.phases = [pscustomobject]$phases
     Set-PipelineState $state
     return [pscustomobject]@{
         Phase     = $Phase
@@ -95,7 +98,7 @@ function Complete-PhaseRun {
         $state.phases.PSObject.Properties | ForEach-Object { $phases[$_.Name] = $_.Value }
     }
     $phases[$Run.Phase] = $entry
-    $state.phases = $phases
+    $state.phases = [pscustomobject]$phases
 
     # Verdict is sticky: once any phase fails, the run verdict stays 'failure'
     # regardless of subsequent phases. Set-RunVerdict is the only way to reach 'success'.
