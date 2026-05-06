@@ -59,9 +59,19 @@ $errors   = @()
 # Normalize XML for comparison (strip whitespace + dynamic Date fields)
 function Normalize-Xml([string]$xmlText) {
     $doc = [xml]$xmlText
-    # Remove RegistrationInfo/Date which schtasks updates on every change
+    # Remove RegistrationInfo/Date which schtasks updates on every change.
     $regInfo = $doc.SelectSingleNode("//*[local-name()='RegistrationInfo']/*[local-name()='Date']")
     if ($regInfo) { $regInfo.ParentNode.RemoveChild($regInfo) | Out-Null }
+    # Remove RegistrationInfo/Description from drift comparison. Description
+    # text is informational only — it doesn't affect scheduling, triggers, or
+    # actions. AND its byte representation drifts permanently between the
+    # canonical .xml file (UTF-8 bytes parsed as the literal characters) and
+    # the live-registered task (schtasks emits UTF-16-with-cp1252-bytes that
+    # PowerShell's [xml] parser substitutes with U+FFFD). The mismatch can
+    # only be reconciled by re-registering, which needs elevation. Stripping
+    # makes drift detection scheduling-relevant only. (kopia-njz)
+    $desc = $doc.SelectSingleNode("//*[local-name()='RegistrationInfo']/*[local-name()='Description']")
+    if ($desc) { $desc.ParentNode.RemoveChild($desc) | Out-Null }
     $sw = New-Object IO.StringWriter
     $w  = New-Object Xml.XmlTextWriter($sw)
     $w.Formatting = 'None'
