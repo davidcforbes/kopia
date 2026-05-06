@@ -49,6 +49,26 @@ Phase 1 also runs as a preflight inside `make sign-all` (so any sign attempt —
 
 `recommendedAction` (failures only) is the exact command to run next.
 
+## Bootstrap on a fresh host
+
+The committed `scripts/scheduled-tasks/*.xml` are per-host snapshots — they hardcode the original developer's SID, username (`HOSTNAME\username` and bare `username`), and repo path (`C:\dev\kopia`). To bootstrap on a different host, regenerate them in place:
+
+```powershell
+# After cloning the repo. Default is the current process's user identity
+# and the current $RepoPath ('C:\dev\kopia').
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\regenerate_scheduled_tasks.ps1
+
+# If you cloned somewhere other than C:\dev\kopia:
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\regenerate_scheduled_tasks.ps1 -RepoPath 'D:\src\kopia'
+```
+
+The script auto-detects the current values from the existing XMLs (single source of truth) and substitutes with the live host's SID + `$env:USERNAME` + `$env:COMPUTERNAME` + `-RepoPath`. Idempotent — running it on the original host or after a successful regen is a no-op.
+
+After regen:
+1. `git diff scripts/scheduled-tasks/` to review
+2. `make deploy-tasks` to register with Task Scheduler (elevation needed for `HighestAvailable` tasks like `KopiaServer` and `WbadminHealthCheck`)
+3. Commit the regenerated XMLs as the new canonical for this host (the per-host snapshot model means the *fork's* canonical updates per-machine)
+
 ## Conventions
 
 - **`Makefile.local.mk` is gitignored** on this fork. New targets are added locally, not committed. To replicate the targets on another machine, copy them from this README's quickstart section or regenerate from the design spec.
