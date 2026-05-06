@@ -9,18 +9,20 @@ REM ============================================================
 setlocal enabledelayedexpansion
 
 set KOPIA_BIN=C:\Users\david\go\bin\kopia.exe
-REM NOTE: kopia-0m5 wrapper-specific cache idea was implemented incorrectly
-REM via --cache-directory in KOPIA_CFG — that flag is only valid for
-REM 'kopia repository connect', NOT for repository status / snapshot create
-REM / etc. Last night's run (Wed 05/06 03:00) aborted at repo-check with:
-REM   kopia.exe: error: unknown long flag '--cache-directory'
+REM Wrapper uses its own client config (epic kopia-0m5) — separate API-mode
+REM connection to the same KopiaServer at 127.0.0.1:51515 but with its own
+REM cacheDirectory (C:\Users\david\AppData\Local\kopia-wrapper-cache) baked
+REM into the config's caching: section. This stops temp-file rename races
+REM with KopiaUI's bundled-server cache.
 REM
-REM Reverted to plain --config-file. The proper kopia-0m5 fix (separate
-REM wrapper.config baking the cache directory in at connect time) is
-REM tracked as a follow-up bead. Wrapper temporarily re-shares cache with
-REM KopiaServer; the temp-file rename races are non-fatal warnings.
-set KOPIA_CFG=--config-file=C:\Users\david\AppData\Roaming\kopia\repository.config
-set KOPIA_CFG_PATH=C:\Users\david\AppData\Roaming\kopia\repository.config
+REM Setup: scripts/connect_wrapper_config.ps1 creates wrapper.config via
+REM 'kopia repository connect server'. Idempotent — safe to re-run.
+REM
+REM Earlier --cache-directory-as-flag attempt (commit 31811507) was wrong:
+REM that flag is only valid on 'repository connect', not on status/snapshot.
+REM See commit 54c4e033 + this commit for the corrected approach.
+set KOPIA_CFG=--config-file=C:\Users\david\AppData\Roaming\kopia\wrapper.config
+set KOPIA_CFG_PATH=C:\Users\david\AppData\Roaming\kopia\wrapper.config
 set KOPIA_REPO=D:\KopiaRepo
 set LOG=C:\dev\kopia\logs\daily_kopia.log
 set SCRIPT_DIR=C:\dev\kopia\scripts
