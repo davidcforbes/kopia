@@ -114,10 +114,14 @@ REM upstream server's heartbeat goes stale (default 180s), so a server hang
 REM fails this wrapper fast instead of waiting for the 08:00 watchdog.
 REM Watchdog exits on its own when this wrapper exits.
 REM
-REM PID resolution via get_parent_pid.ps1 (epic kopia-i1p): the previous
-REM nested-quoted `for /f` PS one-liner produced empty output under S4U
-REM elevated context. Calling a signed -File script sidesteps cmd-quoting.
-for /f %%P in ('"%PS_BIN%" -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\get_parent_pid.ps1"') do set WRAPPER_PID=%%P
+REM PID resolution via get_parent_pid.ps1 (epic kopia-i1p): write to temp
+REM file and read with `set /p`. `for /f %%P in ('"path" args')` mangles
+REM the quoted-path command — cmd's parser strips outer quotes incorrectly,
+REM the inner cmd never executes, the variable stays empty.
+set WRAPPER_PID_TMP=%TEMP%\kopia_wrapper_pid.txt
+"%PS_BIN%" -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\get_parent_pid.ps1" > "%WRAPPER_PID_TMP%" 2>nul
+set /p WRAPPER_PID=<"%WRAPPER_PID_TMP%"
+del "%WRAPPER_PID_TMP%" 2>nul
 if not defined WRAPPER_PID (
     echo %DATE% %TIME% — WARNING: could not resolve wrapper PID; stall guard not started >> "%LOG%"
 ) else (
@@ -125,17 +129,23 @@ if not defined WRAPPER_PID (
     start /B "" "%PS_BIN%" -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\heartbeat_watchdog.ps1" -WrapperPid %WRAPPER_PID%
 )
 
-REM ---- Preflight: check if wbadmin is still running ----
-echo %DATE% %TIME% — [preflight] checking for active wbadmin >> "%LOG%"
-tasklist /fi "imagename eq wbengine.exe" /nh 2>nul | findstr /i "wbengine" >nul
-if not errorlevel 1 (
-    echo %DATE% %TIME% — WARNING: wbengine.exe still running, waiting up to 60 min >> "%LOG%"
+REM ---- Preflight: check if wbadmin is actively backing up (kopia-a74) ----
+REM Previous version checked only `tasklist wbengine.exe` for process presence.
+REM Windows leaves wbengine.exe loaded/idle for some time after a backup
+REM completes, which made ad-hoc/recovery runs falsely wait up to 60 min for
+REM nothing. `wbadmin get status` is the authoritative state — it returns
+REM "ERROR - No backup or recovery operation is currently running." (exit 254)
+REM when idle, regardless of whether the wbengine.exe service host is loaded.
+echo %DATE% %TIME% — [preflight] checking wbadmin status >> "%LOG%"
+wbadmin get status 2>nul | findstr /i /c:"No backup or recovery operation" >nul
+if errorlevel 1 (
+    echo %DATE% %TIME% — WARNING: wbadmin actively backing up, waiting up to 60 min >> "%LOG%"
     set /a WC=0
     :wb_wait
     timeout /t 60 /nobreak >nul
     set /a WC+=1
-    tasklist /fi "imagename eq wbengine.exe" /nh 2>nul | findstr /i "wbengine" >nul
-    if not errorlevel 1 (
+    wbadmin get status 2>nul | findstr /i /c:"No backup or recovery operation" >nul
+    if errorlevel 1 (
         if !WC! LSS 60 (
             echo %DATE% %TIME% — [preflight] wbadmin still running ^(!WC! min^) >> "%LOG%"
             goto wb_wait
@@ -146,7 +156,7 @@ if not errorlevel 1 (
         echo %DATE% %TIME% — [preflight] wbadmin finished after !WC! min >> "%LOG%"
     )
 ) else (
-    echo %DATE% %TIME% — [preflight] no active wbadmin >> "%LOG%"
+    echo %DATE% %TIME% — [preflight] wbadmin idle >> "%LOG%"
 )
 
 REM ---- Preflight: kopia CLI wait + repo lock scan removed (epic kopia-7s7) ----
@@ -227,8 +237,15 @@ echo %DATE% %TIME% — Snapshot list: >> "%LOG%"
 "%KOPIA_BIN%" %KOPIA_CFG% snapshot list --all >> "%LOG%" 2>&1
 
 REM ---- Error check ----
+REM Same temp-file pattern as the WRAPPER_PID resolution above (epic kopia-dgd).
+REM Previous `for /f` invocation occasionally left the inner cmd.exe orphaned
+REM with the powershell child gone but its pipe never closed, hanging the
+REM wrapper 30+ minutes after work was already complete (2026-05-06 incident).
 set ALERT_FILE=C:\dev\kopia\logs\BACKUP_ERRORS.flag
-for /f %%N in ('"%PS_BIN%" -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\check_backup_errors.ps1" "%LOG%"') do set ERR_COUNT=%%N
+set ERR_COUNT_TMP=%TEMP%\kopia_err_count.txt
+"%PS_BIN%" -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\check_backup_errors.ps1" "%LOG%" > "%ERR_COUNT_TMP%" 2>nul
+set /p ERR_COUNT=<"%ERR_COUNT_TMP%"
+del "%ERR_COUNT_TMP%" 2>nul
 if "!ERR_COUNT!"=="" set ERR_COUNT=0
 if !ERR_COUNT! GTR 0 (
     echo %DATE% %TIME% — WARNING: !ERR_COUNT! unexpected errors detected >> "%LOG%"
