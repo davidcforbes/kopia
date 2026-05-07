@@ -205,5 +205,14 @@ look for UI source code in this repo.
   [`AGENTS.md`](AGENTS.md) and run `bd prime` for full workflow context.
 - Use `cp -f`, `mv -f`, `rm -f` to avoid interactive-prompt hangs in
   shells where these aliases are interactive by default.
+- In `.cmd` wrappers, do NOT capture command output with
+  `for /f %%X in ('"<path>" args "<other-path>"')` when the inline
+  command contains two or more quoted strings — cmd's parser strips
+  outer quotes wrong, the inner cmd never executes, and the variable
+  silently stays empty. Use a temp file instead:
+  `<cmd> > "%TEMP%\foo.txt"` then `set /p VAR=<"%TEMP%\foo.txt"`.
+  This was the actual root cause of kopia-i1p (mistakenly attributed
+  to S4U/DCOM for weeks) and kopia-dgd. Fixed in `daily_kopia_backup.cmd`
+  on commit `045cd438`. Search `bd memories for/f` for full detail.
 - Work is not complete until tests pass, code is committed, and
   `git push` succeeds (where applicable for the branch).
