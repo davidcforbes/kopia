@@ -3,12 +3,14 @@ package diff
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/pkg/errors"
 
@@ -51,10 +53,76 @@ type Stats struct {
 type Comparer struct {
 	stats         Stats
 	out           io.Writer
+	ndjsonOut     io.Writer
 	tmpDir        string
 	statsOnly     bool
 	DiffCommand   string
 	DiffArguments []string
+}
+
+// ndjsonRecord is one line of NDJSON output emitted per changed entry when
+// SetNDJSONOutput has been called. Consumers (e.g. external incremental
+// indexers) use these records to rebuild a per-snapshot index from a prior
+// index plus the delta, instead of re-walking the new snapshot from scratch.
+//
+// Op values:
+//
+//	added         — entry exists in e2 but not e1
+//	removed       — entry exists in e1 but not e2
+//	modified      — file with different content (different OID) in e1 vs e2
+//	meta          — entry has same content (same OID) but different metadata
+//	type_changed  — path changed file<->directory between e1 and e2
+//
+// Kind is "file" or "dir". For "type_changed" the new kind is reported in
+// Kind and the prior kind in PrevKind. Numeric Mode is the os.FileMode
+// integer value as emitted by e.Mode().
+type ndjsonRecord struct {
+	Op       string `json:"op"`
+	Kind     string `json:"kind"`
+	Path     string `json:"path"`
+	Size     int64  `json:"size,omitempty"`
+	Mtime    string `json:"mtime,omitempty"`
+	OID      string `json:"oid,omitempty"`
+	PrevOID  string `json:"prev_oid,omitempty"`
+	PrevKind string `json:"prev_kind,omitempty"`
+	Mode     uint32 `json:"mode,omitempty"`
+}
+
+// SetNDJSONOutput configures the comparer to additionally emit one NDJSON
+// record per changed entry to w. Passing nil disables NDJSON emission. The
+// stats JSON written by the CLI to its main output is unaffected.
+func (c *Comparer) SetNDJSONOutput(w io.Writer) {
+	c.ndjsonOut = w
+}
+
+func (c *Comparer) emitNDJSON(op, kind, path string, e fs.Entry, prevOID, prevKind string) {
+	if c.ndjsonOut == nil {
+		return
+	}
+
+	rec := ndjsonRecord{
+		Op:       op,
+		Kind:     kind,
+		Path:     path,
+		PrevOID:  prevOID,
+		PrevKind: prevKind,
+	}
+	if e != nil {
+		rec.Size = e.Size()
+		rec.Mtime = e.ModTime().UTC().Format(time.RFC3339Nano)
+		rec.OID = maybeOID(e)
+		rec.Mode = uint32(e.Mode())
+	}
+
+	b, err := json.Marshal(&rec)
+	if err != nil {
+		// Marshaling a fixed-shape struct of primitives cannot fail in
+		// practice. If it ever does, drop the record rather than abort the
+		// diff — NDJSON is auxiliary output.
+		return
+	}
+
+	fmt.Fprintf(c.ndjsonOut, "%s\n", b) //nolint:errcheck
 }
 
 // Compare compares two filesystem entries and emits their diff information.
@@ -113,9 +181,9 @@ func (c *Comparer) compareEntry(ctx context.Context, e1, e2 fs.Entry, path strin
 	if e1HasObjectID && e2HasObjectID {
 		if h1.ObjectID() == h2.ObjectID() {
 			if _, isDir := e1.(fs.Directory); isDir {
-				compareMetadata(ctx, e1, e2, path, &c.stats.DirectoryEntries)
+				c.compareMetadata(ctx, e1, e2, path, "dir", &c.stats.DirectoryEntries)
 			} else {
-				compareMetadata(ctx, e1, e2, path, &c.stats.FileEntries)
+				c.compareMetadata(ctx, e1, e2, path, "file", &c.stats.FileEntries)
 			}
 
 			return nil
@@ -125,6 +193,7 @@ func (c *Comparer) compareEntry(ctx context.Context, e1, e2 fs.Entry, path strin
 	if e1 == nil {
 		if dir2, isDir2 := e2.(fs.Directory); isDir2 {
 			c.output(c.statsOnly, "added directory %v\n", path)
+			c.emitNDJSON("added", "dir", path, e2, "", "")
 
 			c.stats.DirectoryEntries.Added++
 
@@ -132,6 +201,7 @@ func (c *Comparer) compareEntry(ctx context.Context, e1, e2 fs.Entry, path strin
 		}
 
 		c.output(c.statsOnly, "added file %v (%v bytes)\n", path, e2.Size())
+		c.emitNDJSON("added", "file", path, e2, "", "")
 
 		c.stats.FileEntries.Added++
 
@@ -147,6 +217,7 @@ func (c *Comparer) compareEntry(ctx context.Context, e1, e2 fs.Entry, path strin
 	if e2 == nil {
 		if dir1, isDir1 := e1.(fs.Directory); isDir1 {
 			c.output(c.statsOnly, "removed directory %v\n", path)
+			c.emitNDJSON("removed", "dir", path, e1, "", "")
 
 			c.stats.DirectoryEntries.Removed++
 
@@ -154,6 +225,7 @@ func (c *Comparer) compareEntry(ctx context.Context, e1, e2 fs.Entry, path strin
 		}
 
 		c.output(c.statsOnly, "removed file %v (%v bytes)\n", path, e1.Size())
+		c.emitNDJSON("removed", "file", path, e1, "", "")
 
 		c.stats.FileEntries.Removed++
 
@@ -175,6 +247,7 @@ func (c *Comparer) compareEntry(ctx context.Context, e1, e2 fs.Entry, path strin
 		if !isDir2 {
 			// right is a non-directory, left is a directory
 			c.output(c.statsOnly, "changed %v from directory to non-directory\n", path)
+			c.emitNDJSON("type_changed", "file", path, e2, maybeOID(e1), "dir")
 			return nil
 		}
 
@@ -184,6 +257,7 @@ func (c *Comparer) compareEntry(ctx context.Context, e1, e2 fs.Entry, path strin
 	if isDir2 {
 		// left is non-directory, right is a directory
 		c.output(c.statsOnly, "changed %v from non-directory to a directory\n", path)
+		c.emitNDJSON("type_changed", "dir", path, e2, maybeOID(e1), "file")
 
 		return nil
 	}
@@ -191,6 +265,7 @@ func (c *Comparer) compareEntry(ctx context.Context, e1, e2 fs.Entry, path strin
 	if f1, ok := e1.(fs.File); ok {
 		if f2, ok := e2.(fs.File); ok {
 			c.output(c.statsOnly, "changed %v at %v (size %v -> %v)\n", path, e2.ModTime().String(), e1.Size(), e2.Size())
+			c.emitNDJSON("modified", "file", path, e2, maybeOID(e1), "")
 
 			c.stats.FileEntries.Modified++
 
@@ -208,7 +283,7 @@ func (c *Comparer) compareEntry(ctx context.Context, e1, e2 fs.Entry, path strin
 // Checks for changes in e1's and e2's metadata when they have the same content,
 // and updates the stats accordingly.
 // The function is not concurrency safe, as it updates st without any locking.
-func compareMetadata(ctx context.Context, e1, e2 fs.Entry, path string, st *EntryTypeStats) {
+func (c *Comparer) compareMetadata(ctx context.Context, e1, e2 fs.Entry, path, kind string, st *EntryTypeStats) {
 	var changed bool
 
 	if m1, m2 := e1.Mode(), e2.Mode(); m1 != m2 {
@@ -236,6 +311,8 @@ func compareMetadata(ctx context.Context, e1, e2 fs.Entry, path string, st *Entr
 		st.SameContentButDifferentMetadata++
 
 		log(ctx).Debugf("content unchanged but metadata has been modified: %v", path)
+
+		c.emitNDJSON("meta", kind, path, e2, maybeOID(e1), "")
 	}
 }
 

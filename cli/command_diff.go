@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -20,6 +22,7 @@ type commandDiff struct {
 	diffCompareFiles     bool
 	diffStatsOnly        bool
 	diffCommandCommand   string
+	diffNDJSONOutput     string
 
 	out textOutput
 }
@@ -31,6 +34,7 @@ func (c *commandDiff) setup(svc appServices, parent commandParent) {
 	cmd.Flag("files", "Compare files by launching diff command for all pairs of (old,new)").Short('f').BoolVar(&c.diffCompareFiles)
 	cmd.Flag("stats-only", "Displays only aggregate statistics of the changes between two repository objects").BoolVar(&c.diffStatsOnly)
 	cmd.Flag("diff-command", "Displays differences between two repository objects (files or directories)").Default(defaultDiffCommand()).Envar(svc.EnvName("KOPIA_DIFF")).StringVar(&c.diffCommandCommand)
+	cmd.Flag("ndjson-output", "Write one NDJSON record per changed entry (added/removed/modified/meta/type_changed) to FILE. Stats JSON on stdout is unchanged.").PlaceHolder("FILE").StringVar(&c.diffNDJSONOutput)
 	cmd.Action(svc.repositoryReaderAction(c.run))
 
 	c.out.setup(svc)
@@ -59,6 +63,21 @@ func (c *commandDiff) run(ctx context.Context, rep repo.Repository) error {
 		return errors.Wrap(err, "error creating comparer")
 	}
 	defer d.Close() //nolint:errcheck
+
+	if c.diffNDJSONOutput != "" {
+		f, err := os.Create(c.diffNDJSONOutput)
+		if err != nil {
+			return errors.Wrapf(err, "error creating NDJSON output file %v", c.diffNDJSONOutput)
+		}
+
+		bw := bufio.NewWriter(f)
+		d.SetNDJSONOutput(bw)
+
+		defer func() {
+			_ = bw.Flush()
+			_ = f.Close()
+		}()
+	}
 
 	if c.diffCompareFiles {
 		parts := strings.Split(c.diffCommandCommand, " ")
