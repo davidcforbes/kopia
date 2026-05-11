@@ -70,7 +70,7 @@ $targets = @(
     "$repo\scripts\repo_status_check.ps1",
     "$repo\scripts\check_backup_errors.ps1"
 )
-foreach ($extra in 'check_backup_health.ps1','verify_helpers_preflight.ps1','get_kopia_password.ps1','get_kopia_server_password.ps1','start_kopia_server.ps1','heartbeat_watchdog.ps1','get_parent_pid.ps1') {
+foreach ($extra in 'check_backup_health.ps1','verify_helpers_preflight.ps1','get_kopia_password.ps1','get_kopia_server_password.ps1','start_kopia_server.ps1','heartbeat_watchdog.ps1','get_parent_pid.ps1','daily_d_replica.ps1','weekly_replica_verify.ps1') {
     $p = "$repo\scripts\$extra"
     if (Test-Path $p) { $targets += $p }
 }
