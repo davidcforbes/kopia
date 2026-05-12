@@ -1,4 +1,4 @@
-# kopia_errors.ps1 — Parse Kopia snapshot log for file errors
+﻿# kopia_errors.ps1 -- Parse Kopia snapshot log for file errors
 param([string]$LogFile)
 
 $lines = Select-String -Path $LogFile -Pattern '"error":"(?!null)' |

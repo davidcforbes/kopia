@@ -1,6 +1,6 @@
-# Register the daily Kopia backup health-check task. Runs as the logged-in
+﻿# Register the daily Kopia backup health-check task. Runs as the logged-in
 # user (not SYSTEM) so the toast notification appears in the user's Action
-# Center. powershell.exe (PS 5.1) is required — the script uses WinRT APIs
+# Center. powershell.exe (PS 5.1) is required -- the script uses WinRT APIs
 # that PowerShell 7 (pwsh.exe) does not expose.
 $a = New-ScheduledTaskAction `
     -Execute 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `

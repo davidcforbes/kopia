@@ -1,11 +1,11 @@
-# regenerate_scheduled_tasks.ps1 — rewrite scripts/scheduled-tasks/*.xml
+﻿# regenerate_scheduled_tasks.ps1 -- rewrite scripts/scheduled-tasks/*.xml
 # with the current host's SID + username + hostname + repo path.
 #
 # Use case: bootstrapping the kopia backup stack on a fresh Windows host.
-# The committed XMLs are per-host snapshots (kopia-deq) — they hardcode
+# The committed XMLs are per-host snapshots (kopia-deq) -- they hardcode
 # the original developer's SID, username, hostname, and repo path. On a
 # different host, those values are wrong. This script rewrites them in
-# place. Idempotent — running it on the original host is a no-op.
+# place. Idempotent -- running it on the original host is a no-op.
 #
 # After running, commit the updated XMLs OR run 'make deploy-tasks' to
 # register them under \Backup\.
@@ -16,7 +16,7 @@
 # Override repo path (e.g. if you cloned to D:\src\kopia):
 #   pwsh ... this-script.ps1 -RepoPath 'D:\src\kopia'
 #
-# Override the user identity (rare — only if running ON BEHALF OF another
+# Override the user identity (rare -- only if running ON BEHALF OF another
 # user; typically you want the defaults from the current process):
 #   pwsh ... this-script.ps1 -NewSid 'S-1-5-21-...' -NewUsername 'alice' -NewHostname 'NEWHOST'
 
@@ -31,7 +31,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $xmlDir = Join-Path $RepoPath 'scripts\scheduled-tasks'
-if (-not (Test-Path $xmlDir)) { throw "scripts\scheduled-tasks not found at $xmlDir — wrong -RepoPath?" }
+if (-not (Test-Path $xmlDir)) { throw "scripts\scheduled-tasks not found at $xmlDir -- wrong -RepoPath?" }
 
 # Default NewSid: current process's user SID
 if (-not $NewSid) {
@@ -100,7 +100,7 @@ if (
     ((-not $oldQualifiedAuthor) -or ($oldQualifiedAuthor -eq $newQualifiedAuthor)) -and
     ((-not $oldBareAuthor) -or ($oldBareAuthor -eq $NewUsername))
 ) {
-    Write-Host "[regenerate-tasks] all values already current — no-op" -ForegroundColor Green
+    Write-Host "[regenerate-tasks] all values already current -- no-op" -ForegroundColor Green
     exit 0
 }
 
@@ -126,7 +126,7 @@ foreach ($x in $xmls) {
 
     if ($modified -ne $original) {
         # Preserve the existing encoding pattern (UTF-8 bytes despite the
-        # encoding="UTF-16" declaration — schtasks /create /xml requires it).
+        # encoding="UTF-16" declaration -- schtasks /create /xml requires it).
         Set-Content -Path $x.FullName -Value $modified -Encoding UTF8 -NoNewline
         $changed += $x.Name
     }

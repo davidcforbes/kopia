@@ -1,4 +1,4 @@
-# repo_status_check.ps1 — Run kopia repo status with a timeout
+﻿# repo_status_check.ps1 -- Run kopia repo status with a timeout
 # Usage: repo_status_check.ps1 -KopiaBin <path> -ConfigFile <path> -LogFile <path> [-TimeoutSec 120]
 param(
     [string]$KopiaBin,
@@ -23,7 +23,7 @@ try {
 
     if (-not $exited) {
         $p.Kill()
-        Add-Content $LogFile "$(Get-Date -Format 'ddd MM/dd/yyyy  HH:mm:ss.ff') — [repo-check] TIMEOUT: killed after ${TimeoutSec}s"
+        Add-Content $LogFile "$(Get-Date -Format 'ddd MM/dd/yyyy  HH:mm:ss.ff') -- [repo-check] TIMEOUT: killed after ${TimeoutSec}s"
         exit 99
     }
 
@@ -32,6 +32,6 @@ try {
     exit $p.ExitCode
 }
 catch {
-    Add-Content $LogFile "$(Get-Date -Format 'ddd MM/dd/yyyy  HH:mm:ss.ff') — [repo-check] EXCEPTION: $_"
+    Add-Content $LogFile "$(Get-Date -Format 'ddd MM/dd/yyyy  HH:mm:ss.ff') -- [repo-check] EXCEPTION: $_"
     exit 98
 }

@@ -1,4 +1,4 @@
-# check_wbadmin_health.ps1 - Verify the most recent wbadmin backup is fresh,
+﻿# check_wbadmin_health.ps1 - Verify the most recent wbadmin backup is fresh,
 # post a Windows toast PASS/STALE/FAIL.
 #
 # Strategy: wbadmin get versions only lists *completed* backups. If the

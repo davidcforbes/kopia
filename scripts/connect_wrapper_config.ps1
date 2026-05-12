@@ -1,4 +1,4 @@
-# connect_wrapper_config.ps1 — one-shot setup for the wrapper's separate
+﻿# connect_wrapper_config.ps1 -- one-shot setup for the wrapper's separate
 # kopia client config (epic kopia-0m5).
 #
 # Background: daily_kopia_backup.cmd shares %APPDATA%\kopia\repository.config
@@ -7,7 +7,7 @@
 # per nightly). The fix is a SEPARATE client config for the wrapper with
 # its own cacheDirectory baked in at connect time.
 #
-# This script is IDEMPOTENT — running it twice is safe. If the wrapper
+# This script is IDEMPOTENT -- running it twice is safe. If the wrapper
 # config already exists with a working connection, it's a no-op.
 #
 # Usage: pwsh -NoProfile -ExecutionPolicy Bypass -File this-script.ps1
@@ -36,10 +36,10 @@ Write-Host "[connect-wrapper] cache dir:    $WrapperCache"
 if (Test-Path $WrapperConfig) {
     & $KopiaBin --config-file=$WrapperConfig repository status 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "[connect-wrapper] $WrapperConfig already exists and connects — no-op" -ForegroundColor Green
+        Write-Host "[connect-wrapper] $WrapperConfig already exists and connects -- no-op" -ForegroundColor Green
         exit 0
     }
-    Write-Host "[connect-wrapper] $WrapperConfig exists but doesn't connect — will recreate"
+    Write-Host "[connect-wrapper] $WrapperConfig exists but doesn't connect -- will recreate"
     Remove-Item $WrapperConfig -Force
 }
 
@@ -79,6 +79,6 @@ Write-Host "[connect-wrapper] verifying new config..."
 if ($LASTEXITCODE -ne 0) { throw "wrapper.config repository status returned exit $LASTEXITCODE" }
 
 Write-Host ""
-Write-Host "[connect-wrapper] OK — wrapper config ready" -ForegroundColor Green
+Write-Host "[connect-wrapper] OK -- wrapper config ready" -ForegroundColor Green
 Write-Host "  Config:  $WrapperConfig"
 Write-Host "  Cache:   $WrapperCache  (will be auto-created on first use)"

@@ -1,4 +1,4 @@
-# One-shot helper after password rotation:
+﻿# One-shot helper after password rotation:
 #   1. Prompt for new password (SecureString, never visible)
 #   2. Verify by running `kopia repository status` with KOPIA_PASSWORD env
 #   3. Write new DPAPI-encrypted file at scripts\.kopia-pw.dat
@@ -48,7 +48,7 @@ try {
     }
 
     # Step 3: write DPAPI-encrypted file (machine scope).
-    # Existing file has lockdown ACL (Administrators:R, SYSTEM:R — no Write)
+    # Existing file has lockdown ACL (Administrators:R, SYSTEM:R -- no Write)
     # so we clear the ACL, overwrite, then re-apply lockdown.
     Add-Type -AssemblyName System.Security
     $enc = [Security.Cryptography.ProtectedData]::Protect(

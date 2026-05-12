@@ -1,4 +1,4 @@
-# Clone V2 task config, register under canonical name, unregister V2.
+﻿# Clone V2 task config, register under canonical name, unregister V2.
 
 $ErrorActionPreference = 'Stop'
 

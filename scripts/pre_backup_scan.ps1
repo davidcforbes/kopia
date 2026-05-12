@@ -1,4 +1,4 @@
-# pre_backup_scan.ps1 — Pre-backup scanner for Kopia
+﻿# pre_backup_scan.ps1 -- Pre-backup scanner for Kopia
 # Identifies: large directory trees (stall risk), locked files, and new unexcluded heavy dirs
 # Run before kopia snapshot to proactively update .kopiaignore
 param(

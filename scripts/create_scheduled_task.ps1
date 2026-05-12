@@ -1,4 +1,4 @@
-$a = New-ScheduledTaskAction -Execute "C:\dev\kopia\scripts\daily_kopia_backup.cmd"
+﻿$a = New-ScheduledTaskAction -Execute "C:\dev\kopia\scripts\daily_kopia_backup.cmd"
 $t = New-ScheduledTaskTrigger -Daily -At "3:00AM"
 $s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 4) -StartWhenAvailable -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries
 $p = New-ScheduledTaskPrincipal -UserId "david" -RunLevel Highest -LogonType S4U

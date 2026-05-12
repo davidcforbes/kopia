@@ -1,4 +1,4 @@
-# post_summary_toast.ps1 - Post a Windows toast right after a backup run.
+﻿# post_summary_toast.ps1 - Post a Windows toast right after a backup run.
 #
 # Reads the most recent "Daily Kopia backup start" section of the log,
 # pulls out every "snapshot summary ..." line emitted by `kopia snapshot

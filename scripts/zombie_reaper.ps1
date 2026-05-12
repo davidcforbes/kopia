@@ -1,4 +1,4 @@
-# zombie_reaper.ps1 -- Detect a prior backup run that never wrote a
+﻿# zombie_reaper.ps1 -- Detect a prior backup run that never wrote a
 # "Daily Kopia backup complete" line and append a synthetic FATAL so
 # the Backup Monitor parser does not show a dangling "Running" row.
 #
