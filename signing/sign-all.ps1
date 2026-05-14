@@ -67,6 +67,7 @@ if (-not $dlib)     { throw 'Azure.CodeSigning.Dlib.dll not found. Run: cd signi
 # Targets: the kopia CLI binary plus every PowerShell helper used by scheduled tasks.
 $targets = @(
     'C:\Users\david\go\bin\kopia.exe',
+    'C:\dev\backup-monitor\target\release\backup-mirror.exe',
     "$repo\scripts\repo_status_check.ps1",
     "$repo\scripts\check_backup_errors.ps1"
 )
