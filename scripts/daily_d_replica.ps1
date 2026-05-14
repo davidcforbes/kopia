@@ -1,14 +1,17 @@
 ﻿# daily_d_replica.ps1 -- Daily mirror of D: to the 8 TB external (E:).
 #
-# Single-phase design: VSS shadow of D:, then robocopy /MIR to E:. Kopia's
-# blob format (write-once content blobs, atomic-rename indexes) means a
-# file-level mirror taken from a VSS snapshot yields a valid replica repo
-# openable with the same password. See plan
-# C:\Users\david\.claude\plans\partitioned-jumping-sunrise.md and beads
-# kopia-30c (the original Phase A using `kopia repository sync-to` was
-# dropped -- sync-to is direct-mode only per cli/command_repository_sync.go).
+# Single-tool design: VSS shadow of D:, then one backup-mirror.exe invocation
+# per top-level subtree on D:. Mode is always cbt (chunk-CBT, 4 MiB chunks).
+# WindowsImageBackup uses --manifest-key basename so wbadmin's nightly
+# dated-folder rotation doesn't defeat the incremental; other subtrees use
+# the default relpath keying.
 #
-# Scheduled daily at 05:00 by \Backup\DailyDReplica.
+# History: replaced robocopy /MIR (kopia-5ua), then cwRsync (kopia-0q9),
+# then cwRsync as of kopia-bmy.3 (2026-05-13). The earlier rsync-era code
+# is recoverable via git log; rsync rationale comments were removed to
+# keep the live script focused.
+#
+# Scheduled at 02:00 by \Backup\DailyDReplica (epic kopia-bmy).
 
 [CmdletBinding()]
 param(
@@ -20,11 +23,12 @@ param(
     [string]$HeartbeatLog    = 'C:\dev\kopia\logs\heartbeat.log',
     [string]$AppId           = 'KopiaBackup.HealthCheck',
     [string]$LaunchProto     = 'kopiamonitor:open',
+    [string]$BackupMirrorExe = 'C:\dev\backup-monitor\target\release\backup-mirror.exe',
+    [string]$ManifestRoot    = 'C:\BackupMirror\manifests',
+    [string]$BackupMirrorLogRoot = 'C:\BackupMirror\logs',
     [int]$HeartbeatStaleSec  = 300,
     [int64]$HeadroomBytes    = 50GB,
-    [int]$RobocopyThreads    = 8,
     [int]$ProgressIntervalSec = 60,
-    [int]$StallThresholdSec   = 600,
     [switch]$InitialSeed,
     [switch]$DryRun
 )
@@ -96,18 +100,6 @@ function Append-Summary {
     Add-Content -LiteralPath $DailyKopiaLog -Value $line
 }
 
-function Get-PriorWbadminFolder {
-    param(
-        [Parameter(Mandatory)] [string]$WbadminRoot,
-        [Parameter(Mandatory)] [string]$TodayName
-    )
-    if (-not (Test-Path -LiteralPath $WbadminRoot)) { return $null }
-    Get-ChildItem -LiteralPath $WbadminRoot -Directory -Filter 'Backup *' -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -ne $TodayName } |
-        Sort-Object Name -Descending |
-        Select-Object -First 1
-}
-
 # Cleanup via a child powershell.exe that runs a temp .ps1 file. The file
 # pattern avoids the embedded-double-quote escape hell of -Command when the
 # cleanup logic references WMI filter strings like `"ID='{guid}'"`. Used in
@@ -151,21 +143,19 @@ $dst = $TargetRoot
 $startTime = Get-Date
 $shadow      = $null
 $shadowMount = $null
-$progressJob = $null
 $summary     = @{
     source          = $src
     target          = $dst.TrimEnd('\')
     mode            = $mode
-    bytes           = 0
-    files           = 0
-    errors          = 1   # default fail; cleared on PASS path
+    bytes           = 0           # sum of bytes_written across all backup-mirror invocations
+    files           = 0           # sum of files_total across all backup-mirror invocations
+    errors          = 1           # default fail; cleared on PASS path
     duration_s      = 0
-    robocopy_rc     = -1  # aggregate worst exit code of both rsync calls (kopia-5ua compat)
-    rsync_kopia_rc  = -1  # Tree A (KopiaRepo) exit code
-    rsync_wbadmin_rc = -1 # Tree B (WindowsImageBackup) exit code
-    link_dest_used  = ''  # path to prior wbadmin folder, empty if none found
+    robocopy_rc     = -1          # worst exit code across all backup-mirror invocations (legacy field name preserved for backup-dump compat)
+    chunks_changed  = 0           # sum of chunks_changed across all invocations
+    chunks_total    = 0           # sum of chunks_total across all invocations
     shadow_id       = '-'
-    tool            = 'rsync'
+    tool            = 'backup-mirror'
 }
 
 try {
@@ -255,202 +245,156 @@ try {
         Write-Log "shadow mounted: $shadowMount -> $($shadow.DeviceObject)" 'vss'
     }
 
-    # ---- Phase 2: rsync delta-copy via cwRsync 6.4.8 (two-call split) ----
-    # Replaces the original robocopy /MIR (kopia-5ua). Cygwin-runtime rsync.exe
-    # reads the VSS shadow junction natively (no GLOBALROOT path hack), and
-    # delivers block-level delta-copy semantics so a single block change in a
-    # multi-TB wbadmin VHDX transfers ~MB instead of the whole file.
+    # ---- Phase 2: backup-mirror chunk-CBT (replaces cwRsync, kopia-bmy.3) ----
+    # Single tooling for the whole D: -> E: mirror. One backup-mirror invocation
+    # per top-level subtree on D:\ (via shadow). Mode is always cbt; the
+    # manifest-key differs:
+    #   - WindowsImageBackup: --manifest-key basename. wbadmin renames the
+    #     dated folder ("Backup 2026-05-14 050000") nightly but the VHDX
+    #     basename (the Windows source-disk GUID) is stable, so basename
+    #     keying lets night-2 onward do true block-level incrementals.
+    #   - All other subtrees: --manifest-key relpath (default). Paths are
+    #     stable so relpath keying gives correct identity.
     #
-    # Two-rsync split (kopia-0q9, Phase 1):
-    #   Tree A: KopiaRepo + everything except WindowsImageBackup.
-    #     Uses existing flags (--inplace --no-whole-file --delete-after).
-    #     First-run baseline; incremental thereafter (dedup handles repeats).
-    #   Tree B: WindowsImageBackup only, with --link-dest=<prior dated folder>.
-    #     Wbadmin creates dated folders daily (Backup YYYY-MM-DD HHMMSS).
-    #     Yesterday's folder is the per-file basis pointer; --inplace writes
-    #     deltas in-place, --no-whole-file uses rolling-hash. Unchanged blocks
-    #     become hardlinks (zero disk cost). Expected wall time <90min vs 5-6h
-    #     baseline; transferred bytes <50GB vs ~1TB baseline.
+    # System / transient dirs are excluded by name. The single top-level
+    # ISO (Win11_25H2_*.iso) is intentionally skipped (replaceable media,
+    # would need a single-file-mode backup-mirror invocation).
     #
-    # Flag rationale:
-    #   --recursive --links --times      Match robocopy /COPY:DAT (data + times,
-    #                                    not perms/owner/ACLs -- target ACLs are
-    #                                    intentionally locked). Deliberately
-    #                                    avoid -a because the cygwin runtime
-    #                                    synthesizes POSIX perms from NTFS ACLs
-    #                                    and -a would push them.
-    #   --inplace                        Update file blocks in place; no temp+
-    #                                    rename which would defeat delta match.
-    #   --no-whole-file                  Force delta algorithm even on a local
-    #                                    copy (rsync defaults to whole-file
-    #                                    when both endpoints are local).
-    #   --delete-after                   Mirror semantics (= robocopy /MIR).
-    #                                    Swapped from --delete (--delete-during)
-    #                                    so --link-dest basis files on E:
-    #                                    survive long enough to match.
-    #   --link-dest=<prior dated folder> (Tree B only) Concrete per-file basis.
-    #                                    Unchanged blocks hardlink to prior
-    #                                    dated folder; changed blocks delta-ed.
-    #   --info=stats2,progress2          End-of-run stats + periodic progress.
-    #   --log-file=...                   Dedicated log so the watcher can tail.
-    #   --exclude ...                    Same set as robocopy /XD + /XF --
-    #                                    Sysmon .sdb-wal/.sdb-shm are open-file
-    #                                    transient state (ACL denies even via
-    #                                    VSS shadow), rest are rebuildable.
-    $rsyncBin = 'C:\cwrsync\bin\rsync.exe'
-    if (-not (Test-Path -LiteralPath $rsyncBin)) {
-        throw "rsync.exe not found at $rsyncBin -- run scripts/install_cwrsync.ps1"
+    # Each invocation writes its own progress JSONL and a summary line on
+    # stdout. We aggregate the per-tree CBT stats into the replica summary.
+    $bmExe = $BackupMirrorExe
+    if (-not (Test-Path -LiteralPath $bmExe)) {
+        throw "backup-mirror.exe not found at $bmExe -- run cargo build --release in C:\dev\backup-monitor"
     }
-    $rsyncLog = "$LogFile.rsync"
-    if (Test-Path -LiteralPath $rsyncLog) { Remove-Item -LiteralPath $rsyncLog -Force }
+    $bmSig = Get-AuthenticodeSignature -LiteralPath $bmExe
+    if ($bmSig.Status -ne 'Valid') {
+        throw "backup-mirror.exe signature is not Valid (Status=$($bmSig.Status)) -- run signing\sign-all.ps1"
+    }
+    Write-Log "backup-mirror.exe: $bmExe (sig=$($bmSig.Status))" 'mirror'
 
-    # rsync.exe is a cygwin-runtime binary and expects POSIX paths. Convert
-    # Windows -> cygdrive form:
-    #   'C:\Users\david\AppData\Local\Temp\kopia-replica-shadow-{guid}'
-    #     -> '/cygdrive/c/Users/david/AppData/Local/Temp/kopia-replica-shadow-{guid}'
-    #   'E:\' -> '/cygdrive/e/'
-    function ConvertTo-CygPath {
-        param([string]$WinPath)
-        $p = $WinPath -replace '\\', '/'
-        if ($p -match '^([A-Za-z]):(.*)$') {
-            $letter = $Matches[1].ToLower()
-            $rest   = $Matches[2]
-            if (-not $rest) { $rest = '/' }
-            return "/cygdrive/$letter$rest"
+    # Per-run log root: per-tree progress JSONL + summary log.
+    $runStamp     = (Get-Date).ToString('yyyyMMdd-HHmmss')
+    $runLogDir    = Join-Path $BackupMirrorLogRoot ("run-" + $runStamp)
+    if (-not (Test-Path -LiteralPath $runLogDir)) {
+        New-Item -ItemType Directory -Path $runLogDir -Force | Out-Null
+    }
+    Write-Log "per-run log dir: $runLogDir" 'mirror'
+
+    # Enumerate top-level entries on the source shadow. Skip system dirs and
+    # rsync-historical excludes. Single files at root are skipped (see
+    # note above; the only such file is the Win11 ISO).
+    #
+    # Sysmon: rsync excluded *.sdb-wal/*.sdb-shm because those are open-file
+    # transient state with ACLs that deny even via VSS shadow. backup-mirror
+    # has no --exclude flag, so hitting one of those files would abort the
+    # Sysmon subtree mid-run. Skip the whole subtree until backup-mirror
+    # gains per-file-skip semantics. Sysmon is local telemetry, regenerable.
+    $EXCLUDE_TOP = @('$RECYCLE.BIN', 'System Volume Information', 'BackupMonitorIndex', 'Sysmon')
+    $topEntries  = Get-ChildItem -LiteralPath $shadowPath -Force -ErrorAction Stop |
+                   Where-Object { $_.PSIsContainer -and ($EXCLUDE_TOP -notcontains $_.Name) }
+    $skippedFiles = Get-ChildItem -LiteralPath $shadowPath -File -Force -ErrorAction SilentlyContinue
+    foreach ($f in $skippedFiles) {
+        Write-Log "skipping top-level file (no single-file cbt mode): $($f.Name)" 'mirror'
+    }
+    if (-not $topEntries) { throw "no top-level subdirs found on shadow ($shadowPath)" }
+    Write-Log ("subtrees to mirror: " + (($topEntries | ForEach-Object Name) -join ', ')) 'mirror'
+
+    $worstRc        = 0
+    $aggBytes       = [int64]0
+    $aggFiles       = [int64]0
+    $aggChunksChg   = [int64]0
+    $aggChunksTot   = [int64]0
+    $perTreeReports = @()
+
+    foreach ($entry in $topEntries) {
+        $treeName    = $entry.Name
+        $srcPath     = $entry.FullName.TrimEnd('\')
+        $dstPath     = (Join-Path $dst $treeName).TrimEnd('\')
+        $mfdPath     = Join-Path $ManifestRoot $treeName
+        $progressLog = Join-Path $runLogDir ("{0}.progress.jsonl" -f $treeName)
+        $summaryOut  = Join-Path $runLogDir ("{0}.summary.log"   -f $treeName)
+        $manifestKey = if ($treeName -eq 'WindowsImageBackup') { 'basename' } else { 'relpath' }
+
+        if (-not (Test-Path -LiteralPath $mfdPath)) {
+            New-Item -ItemType Directory -Path $mfdPath -Force | Out-Null
         }
-        return $p
-    }
-    $srcCyg = (ConvertTo-CygPath ($shadowPath.TrimEnd('\'))) + '/'
-    $dstCyg = (ConvertTo-CygPath ($dst.TrimEnd('\')))         + '/'
 
-    # Spawn a background watcher that emits [progress] lines and flags stalls.
-    # Polls $ProgressIntervalSec; if neither write rate, E: usage, nor the
-    # rsync log file grows for $StallThresholdSec, the line is tagged STALL.
-    # Watcher does not kill rsync -- operator decides via Get-Content $LogFile.
-    # Both rsync calls write to the same $rsyncLog, so the watcher spans both.
-    if (-not $DryRun) {
-        $progressJob = Start-Job -ArgumentList $LogFile,$rsyncLog,$dst.Substring(0,1),$ProgressIntervalSec,$StallThresholdSec -ScriptBlock {
-            param($logFile,$rsyncLog,$targetLetter,$intervalSec,$stallSec)
-            # Active-data signal is the LogicalDisk write rate for the target.
-            # E:used and rsync log file size can be flat for minutes while
-            # rsync delta-rebuilds a large file in-place. Treat any sustained
-            # write > 1 MB/s as evidence of progress (matches the robocopy-era
-            # heuristic from kopia-30c that fixed the 2026-05-10 false-STALL).
-            $counterPath = "\LogicalDisk($($targetLetter):)\Disk Write Bytes/sec"
-            $lastChange = Get-Date
-            while ($true) {
-                Start-Sleep -Seconds $intervalSec
-                $vol = Get-Volume -DriveLetter $targetLetter -ErrorAction SilentlyContinue
-                if (-not $vol) {
-                    Add-Content -LiteralPath $logFile -Value ('{0} -- [progress] target volume not visible' -f (Get-Date -Format 'ddd MM/dd/yyyy HH:mm:ss.ff'))
-                    continue
+        $argList = @(
+            'mirror',
+            '--mode',  'cbt',
+            '--src',   $srcPath,
+            '--dst',   $dstPath,
+            '--manifest-dir', $mfdPath,
+            '--manifest-key', $manifestKey,
+            '--progress-interval-sec', "$ProgressIntervalSec"
+        )
+        if ($DryRun) { $argList += '--dry-run' }
+
+        Write-Log ("[{0}] launching: mode=cbt manifest-key={1} dst={2}" -f $treeName, $manifestKey, $dstPath) 'mirror'
+        $treeStart = Get-Date
+        $proc = Start-Process -FilePath $bmExe -ArgumentList $argList `
+                              -RedirectStandardOutput $summaryOut `
+                              -RedirectStandardError  $progressLog `
+                              -WindowStyle Hidden -PassThru -Wait
+        $rc = $proc.ExitCode
+        $treeDur = [int]((Get-Date) - $treeStart).TotalSeconds
+        if ($rc -gt $worstRc) { $worstRc = $rc }
+
+        # Parse the final stdout summary line:
+        #   "backup-mirror summary mode=cbt files_total=X files_first_run=Y
+        #    files_torn_recovered=Z chunks_total=A chunks_changed=B
+        #    chunks_zero=C bytes_read=D bytes_written=E duration_s=F errors=G"
+        $bytes = 0; $files = 0; $chunksTot = 0; $chunksChg = 0
+        if (Test-Path -LiteralPath $summaryOut) {
+            $sumLine = Get-Content -LiteralPath $summaryOut -Tail 5 |
+                       Where-Object { $_ -match '^backup-mirror summary ' } |
+                       Select-Object -Last 1
+            if ($sumLine) {
+                foreach ($tok in ($sumLine -split '\s+')) {
+                    $kv = $tok -split '=', 2
+                    if ($kv.Count -eq 2) {
+                        switch ($kv[0]) {
+                            'files_total'    { $files     = [int64]$kv[1] }
+                            'chunks_total'   { $chunksTot = [int64]$kv[1] }
+                            'chunks_changed' { $chunksChg = [int64]$kv[1] }
+                            'bytes_written'  { $bytes     = [int64]$kv[1] }
+                        }
+                    }
                 }
-                $used = $vol.Size - $vol.SizeRemaining
-                $rsz  = if (Test-Path -LiteralPath $rsyncLog) { (Get-Item -LiteralPath $rsyncLog).Length } else { 0 }
-
-                $writeMBps = 0.0
-                try {
-                    $s = Get-Counter -Counter $counterPath -SampleInterval 1 -MaxSamples 2 -ErrorAction Stop
-                    $writeMBps = ($s.CounterSamples | Measure-Object CookedValue -Average).Average / 1MB
-                } catch {}
-
-                $now = Get-Date
-                if ($writeMBps -gt 1.0) { $lastChange = $now }
-                $idleSec = [int]($now - $lastChange).TotalSeconds
-                $tag = if ($idleSec -gt $stallSec) { ' STALL' } else { '' }
-                $line = '{0} -- [progress] {1}:used={2:N2}GB write={3:N1}MB/s rsync_log={4}KB idle={5}s{6}' -f `
-                    $now.ToString('ddd MM/dd/yyyy HH:mm:ss.ff'), $targetLetter, ($used/1GB), $writeMBps, [math]::Round($rsz/1KB,1), $idleSec, $tag
-                Add-Content -LiteralPath $logFile -Value $line
             }
         }
-        Write-Log "progress watcher started (job id=$($progressJob.Id), interval=${ProgressIntervalSec}s, stall=${StallThresholdSec}s)" 'mirror'
-    }
+        Write-Log ("[{0}] rc={1} duration={2}s bytes_written={3} files={4} chunks_changed={5}/{6}" -f `
+            $treeName, $rc, $treeDur, $bytes, $files, $chunksChg, $chunksTot) 'mirror'
 
-    # Tree A: Everything except WindowsImageBackup
-    $rsyncArgsA = @(
-        '--recursive'
-        '--links'
-        '--times'
-        '--inplace'
-        '--no-whole-file'
-        '--delete-after'
-        '--info=name,progress2,stats2'
-        "--log-file=$rsyncLog"
-        '--exclude=$RECYCLE.BIN/'
-        '--exclude=System Volume Information/'
-        '--exclude=BackupMonitorIndex/'
-        '--exclude=*.sdb-wal'
-        '--exclude=*.sdb-shm'
-        '--exclude=WindowsImageBackup/'
-    )
-    if ($DryRun) { $rsyncArgsA += '--dry-run' }
-    $rsyncArgsA += $srcCyg
-    $rsyncArgsA += $dstCyg
-    Write-Log "rsync tree-A (kopia): $(($rsyncArgsA | Measure-Object).Count) args" 'mirror'
-    & $rsyncBin @rsyncArgsA | Out-Null
-    $rcA = $LASTEXITCODE
-    $summary.rsync_kopia_rc = $rcA
-
-    # Tree B: WindowsImageBackup with --link-dest pointing at yesterday's dated folder
-    $srcWbadminRoot = Join-Path $shadowPath 'WindowsImageBackup\ChrisLaptop2'
-    $todayFolder    = Get-ChildItem -LiteralPath $srcWbadminRoot -Directory -Filter 'Backup *' -ErrorAction SilentlyContinue |
-                      Sort-Object Name -Descending | Select-Object -First 1
-    $linkDest       = ''
-    if ($todayFolder) {
-        $priorFolder = Get-PriorWbadminFolder `
-            -WbadminRoot 'E:\WindowsImageBackup\ChrisLaptop2' `
-            -TodayName   $todayFolder.Name
-        if ($priorFolder) { $linkDest = (ConvertTo-CygPath $priorFolder.FullName) }
-    }
-    $summary.link_dest_used = $linkDest
-
-    $rsyncArgsB = @(
-        '--recursive'
-        '--links'
-        '--times'
-        '--inplace'
-        '--no-whole-file'
-        '--delete-after'
-        '--info=name,progress2,stats2'
-        "--log-file=$rsyncLog"
-    )
-    if ($linkDest) { $rsyncArgsB += "--link-dest=$linkDest" }
-    if ($DryRun)   { $rsyncArgsB += '--dry-run' }
-    $rsyncArgsB += (ConvertTo-CygPath (Join-Path $shadowPath 'WindowsImageBackup')) + '/'
-    $rsyncArgsB += (ConvertTo-CygPath 'E:\WindowsImageBackup') + '/'
-    Write-Log "rsync tree-B (wbadmin): $(($rsyncArgsB | Measure-Object).Count) args, link-dest=$linkDest" 'mirror'
-    & $rsyncBin @rsyncArgsB | Out-Null
-    $rcB = $LASTEXITCODE
-    $summary.rsync_wbadmin_rc = $rcB
-
-    # rsync exit codes: 0 = success; 23 = "partial transfer due to errors";
-    # 24 = "some files vanished before transfer". Treat 0/23/24 as PASS (like
-    # robocopy 1-7), any other non-zero as failure.
-    $rsyncFail = $false
-    foreach ($rc in @($rcA, $rcB)) {
-        if ($rc -ne 0 -and $rc -ne 23 -and $rc -ne 24) { $rsyncFail = $true; break }
-    }
-    if ($rsyncFail) {
-        throw "rsync failed: tree-A rc=$rcA, tree-B rc=$rcB (see $rsyncLog)"
-    }
-    $summary.robocopy_rc = [Math]::Max($rcA, $rcB)
-    Write-Log "rsync tree-A rc=$rcA tree-B rc=$rcB max=$($summary.robocopy_rc) (0/23/24 = pass)" 'mirror'
-
-    # Parse rsync stats2 output for bytes/files totals (best-effort).
-    # rsync stats2 lines we care about:
-    #   "Number of files: 30,915 (reg: 26,241, dir: 4,674)"
-    #   "Total file size: 602,399,618,017 bytes"
-    if (Test-Path -LiteralPath $rsyncLog) {
-        $rsyncTail = Get-Content -LiteralPath $rsyncLog -Tail 25
-        $filesLine = $rsyncTail | Where-Object { $_ -match 'Number of files:' } | Select-Object -First 1
-        if ($filesLine -match 'reg:\s*([\d,]+)') {
-            $summary.files = [int64](($Matches[1] -replace ',',''))
+        $perTreeReports += [pscustomobject]@{
+            tree         = $treeName
+            rc           = $rc
+            duration_s   = $treeDur
+            files        = $files
+            bytes        = $bytes
+            chunks_total = $chunksTot
+            chunks_changed = $chunksChg
+            manifest_key = $manifestKey
         }
-        $bytesLine = $rsyncTail | Where-Object { $_ -match 'Total file size:' } | Select-Object -First 1
-        if ($bytesLine -match 'Total file size:\s*([\d,]+)') {
-            $summary.bytes = [int64](($Matches[1] -replace ',',''))
-        }
+
+        $aggBytes     += $bytes
+        $aggFiles     += $files
+        $aggChunksTot += $chunksTot
+        $aggChunksChg += $chunksChg
     }
+
+    $summary.bytes          = $aggBytes
+    $summary.files          = $aggFiles
+    $summary.chunks_total   = $aggChunksTot
+    $summary.chunks_changed = $aggChunksChg
+    $summary.robocopy_rc    = $worstRc
+
+    if ($worstRc -ne 0) {
+        $failedTrees = ($perTreeReports | Where-Object { $_.rc -ne 0 } | ForEach-Object { "$($_.tree)=$($_.rc)" }) -join ', '
+        throw "backup-mirror failed on: $failedTrees (worst rc=$worstRc; per-tree logs in $runLogDir)"
+    }
+    Write-Log ("all subtrees PASS: trees={0} total_bytes_written={1} total_files={2} chunks_changed/total={3}/{4}" -f `
+        $perTreeReports.Count, $aggBytes, $aggFiles, $aggChunksChg, $aggChunksTot) 'mirror'
 
     $summary.errors = 0
     Write-Log "PASS" 'result'
@@ -462,18 +406,6 @@ catch {
     $summary.errors = 1
 }
 finally {
-    # Stop the progress watcher first so it doesn't keep emitting after the
-    # mirror is done.
-    if ($progressJob) {
-        try {
-            Stop-Job -Job $progressJob -ErrorAction Stop | Out-Null
-            Remove-Job -Job $progressJob -Force -ErrorAction Stop | Out-Null
-            Write-Log "progress watcher stopped" 'vss'
-        } catch {
-            Write-Log "WARNING: progress watcher cleanup failed: $_" 'vss'
-        }
-    }
-
     # Cleanup VSS shadow + mount in a child powershell.exe (via temp .ps1 file
     # to dodge -Command quoting hell). Hard 30s timeout -- any orphan that
     # survives gets caught by next-run preflight.
@@ -516,12 +448,15 @@ finally {
 
     Write-Log "============================================"
     exit $summary.errors
+}
+
+
 
 # SIG # Begin signature block
 # MII9bQYJKoZIhvcNAQcCoII9XjCCPVoCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCuzHn+sdHArdAm
-# cqkxljjsHKZ6m7oaZU3gls2UYRYSXqCCIjAwggXMMIIDtKADAgECAhBUmNLR1FsZ
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCpuVPNxoWVmfyf
+# RoMOqV/foCO5pG5f98Z1lfQcntsy0aCCIjAwggXMMIIDtKADAgECAhBUmNLR1FsZ
 # lUgTecgRwIeZMA0GCSqGSIb3DQEBDAUAMHcxCzAJBgNVBAYTAlVTMR4wHAYDVQQK
 # ExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xSDBGBgNVBAMTP01pY3Jvc29mdCBJZGVu
 # dGl0eSBWZXJpZmljYXRpb24gUm9vdCBDZXJ0aWZpY2F0ZSBBdXRob3JpdHkgMjAy
@@ -708,23 +643,23 @@ finally {
 # cmF0aW9uMSswKQYDVQQDEyJNaWNyb3NvZnQgSUQgVmVyaWZpZWQgQ1MgQU9DIENB
 # IDAzAhMzAAD5lfAL+yA2/46OAAAAAPmVMA0GCWCGSAFlAwQCAQUAoF4wEAYKKwYB
 # BAGCNwIBDDECMAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwLwYJKoZIhvcN
-# AQkEMSIEIOCuZHztf0KG1D4JVoY9s+AIX0VngjkvmE/2cMBbtUstMA0GCSqGSIb3
-# DQEBAQUABIIBgHc301rNQNe/hNbeaxjHHbG8RGo88msFLONlWJKZpWxU2nRRbkz2
-# zD+PMrzIFO6T5ZHJkbVhmammUGnR3SK6u93iFxv7EKmrLIleilGvZunGJ3S8RAHQ
-# zRMI8eQPAQd4cRRDD0bmIiMwN5NuN/9uDUx3SoB5VE3PT2y4DcaNmn5f2lk0Jtw/
-# Fc1KdcRhsiA1V5W6G3CyIODaQhAhwsfTu+peZTMJ3pzPZnXzgu9lgV6ECKY40qGB
-# fsZhbFQnrlkSYSBWdj+7Igm4k5PQSmq7/4zut9TBy1r/mPgpAQTA+YzaG7yhOM8P
-# tdoINJPN4SNGNsW3x47mUwEnrZ8I/RY2CMa2Xd4TLU4xCfppVPMw0Ng8ynT3Y0+7
-# vr07VfDn0owbNHOxAjNCFnghqGH1ajGBjO6FPyoWsDNpMSjiXgznzCFPSQD6A/l+
-# Qw1cynnCHphc/fLKWeTQnvNBQC4h6uMaOpNDqJKmmScij4yQxiG5Q5GDrVfx0bfT
-# yZeWyuhnH1QThKGCGBMwghgPBgorBgEEAYI3AwMBMYIX/zCCF/sGCSqGSIb3DQEH
+# AQkEMSIEIFO7h2modWwj9FNXJUcCU1VQTN+366BID88Xusd4uLkXMA0GCSqGSIb3
+# DQEBAQUABIIBgENdNQ1ldaWoSYc8lofgxwmIPNWsK2SanxMG4DB1Cer4zAQGhq2R
+# P7BgOtbwEmDQjLiXyLTcZOV1T88yJkEMgFNfRps7S9d3sdYWdu7/koYv72RfRvsC
+# gkPB4ymA6Fe7jCHN7sNfpa1PetAWejzxqx52bhP+3pn+wExctLYvXXaSONFWzeQE
+# S5kcNzvQVYIoHZXR9L3Q6cH5bYUq1pvQF+LhCwQBo7TWlJagZnWRHH3g+OjxOmWN
+# E4SG0vXzzevzE3bpbI3FxFidQiI3tGOSaLT52o4xRCSw+rwmFu970J1EW2ivukT1
+# buy9JtCF0qWOq5QVWYUu6jgFnLHwfONt0kIspZgyZbFSRc4bJbzOqxzzmYcZ0i5z
+# cqDxJ+6mUKMJGaFOecGM/3bmi9ioRpHKCWNsqRcnGLRvPtTebPlApKKn1atlBwfe
+# lNdxr71esooM79WWs756rlPfurF/o8rnBMEQdR46pR0Ct2vQE+hxSRAAT+vq/AWr
+# XCIHriaWct5kU6GCGBMwghgPBgorBgEEAYI3AwMBMYIX/zCCF/sGCSqGSIb3DQEH
 # AqCCF+wwghfoAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFhBgsqhkiG9w0BCRABBKCC
-# AVAEggFMMIIBSAIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCCXmQis
-# O5zC4fx+cZkKWzwOsjj5bgmj12XS0MUYvGYB5wIGaedYfrzcGBIyMDI2MDUxNDAy
-# MTc0Ni4zN1owBIACAfSggeGkgd4wgdsxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpX
+# AVAEggFMMIIBSAIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCBoQGS5
+# DolDTsaCQLHdunqP+y6AOSXgQ/gJdCgeL206FQIGaeiBIh0uGBIyMDI2MDUxNDA1
+# NDAwNC43NlowBIACAfSggeGkgd4wgdsxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpX
 # YXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVNaWNyb3NvZnQg
 # Q29ycG9yYXRpb24xJTAjBgNVBAsTHE1pY3Jvc29mdCBBbWVyaWNhIE9wZXJhdGlv
-# bnMxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo3ODAwLTA1RTAtRDk0NzE1MDMG
+# bnMxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo3RDAwLTA1RTAtRDk0NzE1MDMG
 # A1UEAxMsTWljcm9zb2Z0IFB1YmxpYyBSU0EgVGltZSBTdGFtcGluZyBBdXRob3Jp
 # dHmggg8hMIIHgjCCBWqgAwIBAgITMwAAAAXlzw//Zi7JhwAAAAAABTANBgkqhkiG
 # 9w0BAQwFADB3MQswCQYDVQQGEwJVUzEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBv
@@ -766,27 +701,27 @@ finally {
 # U5ODIRfyoGl59BsXR/HpRGtiJquOYGmvA/pk5vC1lcnbeMrcWD/26ozePQ/TWfNX
 # KBOmkFpvPE8CH+EeGGWzqTCjdAsno2jzTeNSxlx3glDGJgcdz5D/AAxw9Sdgq/+r
 # Y7jjgs7X6fqPTXPmaCAJKVHAP19oEjJIBwD1LyHbaEgBxFCogYSOiUIr0Xqcr1nJ
-# fiWG2GwYe6ZoAF1bMIIHlzCCBX+gAwIBAgITMwAAAFck05XgounJMQAAAAAAVzAN
+# fiWG2GwYe6ZoAF1bMIIHlzCCBX+gAwIBAgITMwAAAFXZ3WkmKPn44gAAAAAAVTAN
 # BgkqhkiG9w0BAQwFADBhMQswCQYDVQQGEwJVUzEeMBwGA1UEChMVTWljcm9zb2Z0
 # IENvcnBvcmF0aW9uMTIwMAYDVQQDEylNaWNyb3NvZnQgUHVibGljIFJTQSBUaW1l
-# c3RhbXBpbmcgQ0EgMjAyMDAeFw0yNTEwMjMyMDQ2NTNaFw0yNjEwMjIyMDQ2NTNa
+# c3RhbXBpbmcgQ0EgMjAyMDAeFw0yNTEwMjMyMDQ2NDlaFw0yNjEwMjIyMDQ2NDla
 # MIHbMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMH
 # UmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSUwIwYDVQQL
 # ExxNaWNyb3NvZnQgQW1lcmljYSBPcGVyYXRpb25zMScwJQYDVQQLEx5uU2hpZWxk
-# IFRTUyBFU046NzgwMC0wNUUwLUQ5NDcxNTAzBgNVBAMTLE1pY3Jvc29mdCBQdWJs
+# IFRTUyBFU046N0QwMC0wNUUwLUQ5NDcxNTAzBgNVBAMTLE1pY3Jvc29mdCBQdWJs
 # aWMgUlNBIFRpbWUgU3RhbXBpbmcgQXV0aG9yaXR5MIICIjANBgkqhkiG9w0BAQEF
-# AAOCAg8AMIICCgKCAgEAsWylCpMIfbizJLY1kPXO2cmX2HRWvRbAmeKSZ5ex7/jC
-# ymdV7Eap+Ic2iqRtWDkKKe5gL6JV80wtn5C2qHJLPxUYFKNG3UkHkAI21MoCN+YW
-# nhT8K/YuPib6+6970jdbeFKIiZMWwd5hnpX9J3jeteuEdXbp/DfFBK15JuD3JOzW
-# uF2suQCPgqYjQPk/gpq+3KCKtXJRbXSCSJ9YtITU2IHwmfdE7l2PfZ154w041po+
-# fDeTj0gJOzcV/Jv56Q0M+w19jAKo/I5PEzrLV1IPQnmP4or1X4RbJXk8ONXyOOfX
-# OxK2VLpNxgklK1yAezbFP2uzqihaXkW1h9GQLGENKESnezwgdRaLNNaYtm8AT/pZ
-# HYJ35mZVqkZdMIckpQHJk/F1fSLyDKeKtH4TC4cc3ESKUMgItq07ZZm74JCsfhmr
-# Q1ijVNDi1Sln+QBamgC7WviZbkQnceQRq9DY+6hANwOrasAZUiVr2kPuj1jHDOXz
-# UG4O9QTK70P/oXSqZAN1oTv3UfF8JTGmAxg+l1ZPOz50MY96HBDw/3bI/wBGNvLk
-# 6fLVnrxGN5B5unF/lYvjjWbIUdyBPVQnPOKXu08SRHbY19M1HoWX6PNZv+vzSeqV
-# eWWHKdKjC3GjVjbbGpi+JLbiyaKRSwEqo49tJLvu69cQ7dWsbksai4TURnVj2mMC
-# AwEAAaOCAcswggHHMB0GA1UdDgQWBBSOg8leLTUOAglIZ+bjXpiD7RKSpzAfBgNV
+# AAOCAg8AMIICCgKCAgEAvbkfkh5ZSLP0MCUWafaw/KZoVZu9iQx8r5JwhZvdrUi8
+# 6UjCCFQONjQanrIxGF9hRGIZLQZ50gHrLC+4fpUEJff5t04VwByWC2/bWOuk6Nma
+# Th9JpPZDcGzNR95QlryjfEjtl+gxj12zNPEdADPplVfzt8cYRWFBx/Fbfch08k6P
+# 9p7jX2q1jFPbUxWYJ+xOyGC1aKhDGY5b+8wL39v6qC0HFIx/v3y+bep+aEXooK8V
+# oeWK+szfaFjXo8YTcvQ8UL4szu9HFTuZNv6vvoJ7Ju+o5aTj51sph+0+FXW38TlL
+# /rDBd5ia79jskLtOeHbDjkbljilwzegcxv9i49F05ZrS/5ELZCCY1VaqO7EOLKVa
+# xxdAO5oy1vb0Bx0ZRVX1mxFjYzay2EC051k6yGJHm58y1oe2IKRa/SM1+BTGse6v
+# HNi5Q2d5ZnoR9AOAUDDwJIIqRI4rZz2MSinh11WrXTG9urF2uoyd5Ve+8hxes9AB
+# eP2PYQKlXYTAxvdaeanDTQ/vwmnM+yTcWzrVm84Z38XVFw4G7p/ZNZ2nscvv6uru
+# 2AevXcyV1t8ha7iWmhhgTWBNBrViuDlc3iPvOz2SVPbPeqhyY/NXwNZCAgc2H5pO
+# ztu6MwQxDIjte3XM/FkKBxHofS2abNT/0HG+xZtFqUJDaxgbJa6lN1zh7spjuQ8C
+# AwEAAaOCAcswggHHMB0GA1UdDgQWBBRWBF8QbdwIA/DIv6nJFsrB16xltjAfBgNV
 # HSMEGDAWgBRraSg6NS9IY0DPe9ivSek+2T3bITBsBgNVHR8EZTBjMGGgX6Bdhlto
 # dHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NybC9NaWNyb3NvZnQlMjBQ
 # dWJsaWMlMjBSU0ElMjBUaW1lc3RhbXBpbmclMjBDQSUyMDIwMjAuY3JsMHkGCCsG
@@ -796,54 +731,54 @@ finally {
 # CgYIKwYBBQUHAwgwDgYDVR0PAQH/BAQDAgeAMGYGA1UdIARfMF0wUQYMKwYBBAGC
 # N0yDfQEBMEEwPwYIKwYBBQUHAgEWM2h0dHA6Ly93d3cubWljcm9zb2Z0LmNvbS9w
 # a2lvcHMvRG9jcy9SZXBvc2l0b3J5Lmh0bTAIBgZngQwBBAIwDQYJKoZIhvcNAQEM
-# BQADggIBAHJ1wHY86Zk5SUBDPY25d/u9YJVaaNa71uxjX4cyO/XJ4uPENCSOwkRT
-# nNogPLxTD0Fg3z4TFf/2T/0IFSxdtWVtTjhzrn+WLInzeRawUhTCFVrPBJKEWVsh
-# m+Ig7/nB7JbJN88+ltImBbL5kT1StBLfG6UksAcDbNSQww90CUXhGueBxlnSvjkA
-# X1ohiN16y1bB2s0rvQx8Csepl2CuBefTfDrMGzW/tzNx5YaK2D8OWweqTWZcGlJO
-# 4YjZNI83cTrQghfHl/8AXOHj8cWL3wEFltQQs2xeRYAb3Kdnl7oIWKKXWaBYJY5P
-# 3QPsiC+DTMp7ejdYKTrb396f3gr+wL/Ms5/Z3vIWZPJJv18qNw40fUNveRnwzMQn
-# x8dM2bGuXXQZ5y7P8aXT4HJMo349qZtn4XQwiUE/DDp++MUL0kgjvd/Deo7Xr371
-# PFPPYb4TboZhjV1x9+wCHDoOpNCBt+VuXU78ytJdKzQ1Jv2cEP1F9H9/wSLsMDUv
-# WME7u9mGElOPDZPMVr8AuBEuLdbTSEdaLwsZBplzxLBcgxhZ/Cs30yBhuE3QhqT1
-# YDZ2pa56RexPA2SasPcToT6gJgJ6E06BmZ2zQTNvWOjs5XQqHbYuXcoeDcwe2UaC
-# 7EDOGD8GmLE9LiqtQsuQCM7v7I2xR+sPZT2Ax/85HjIkM+3MzTK1MYIHRjCCB0IC
+# BQADggIBAFIe4ZJUe9qUKcWeWypchB58fXE/ZIWv2D5XP5/k/tB7LCN9BvmNSVKZ
+# 3VeclQM978wfEvuvdMQSUv6Y20boIM8DK1K1IU9cP21MG0ExiHxaqjrikf2qbfrX
+# Iip4Ef3v2bNYKQxCxN3Sczp1SX0H7uqK2L5OhfDEiXf15iou5hh+EPaaqp49czNQ
+# pJDOR/vfJghUc/qcslDPhoCZpZx8b2ODvywGQNXwqlbsmCS24uGmEkQ3UH5JUeN6
+# c91yasVchS78riMrm6R9ZpAiO5pfNKMGU2MLm1A3pp098DcbFTAc95Hh6Qvkh//2
+# 8F/Xe2bMFb6DL7Sw0ZO95v0gv0ZTyJfxS/LCxfraeEII9FSFOKAMEp1zNFSs2ue0
+# GGjBt9yEEMUwvxq9ExFz0aZzYm8ivJfffpIVDnX/+rVRTYcxIkQyFYslIhYlWF9S
+# jCw5r49qakjMRNh8W9O7aaoolSVZleQZjGt0K8JzMlyp6hp2lbW6XqRx2cOHbbxJ
+# DxmENzohGUziI13lI2g2Bf5qibfC4bKNRpJo9lbE8HUbY0qJiE8u3SU8eDQaySPX
+# OEhJjxRCQwwOvejYmBG5P7CckQNBSnnl12+FKRKgPoj0Mv+z5OMhj9z2MtpbnHLA
+# kep0odQClEyyCG/uR5tK5rW6mZH5Oq56UWS0NI6NV1JGS7Jri6jFMYIHRjCCB0IC
 # AQEweDBhMQswCQYDVQQGEwJVUzEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0
 # aW9uMTIwMAYDVQQDEylNaWNyb3NvZnQgUHVibGljIFJTQSBUaW1lc3RhbXBpbmcg
-# Q0EgMjAyMAITMwAAAFck05XgounJMQAAAAAAVzANBglghkgBZQMEAgEFAKCCBJ8w
+# Q0EgMjAyMAITMwAAAFXZ3WkmKPn44gAAAAAAVTANBglghkgBZQMEAgEFAKCCBJ8w
 # EQYLKoZIhvcNAQkQAg8xAgUAMBoGCSqGSIb3DQEJAzENBgsqhkiG9w0BCRABBDAc
-# BgkqhkiG9w0BCQUxDxcNMjYwNTE0MDIxNzQ2WjAvBgkqhkiG9w0BCQQxIgQgpOAR
-# Y32tJzRkVlHcdEdU8JJfvZJ5+TgAxqUxu6zxH/4wgbkGCyqGSIb3DQEJEAIvMYGp
-# MIGmMIGjMIGgBCD1PJ9ktQVuTGWIbKLO4f1VUOlUU29ARCEpDZmFTHjbUjB8MGWk
+# BgkqhkiG9w0BCQUxDxcNMjYwNTE0MDU0MDA0WjAvBgkqhkiG9w0BCQQxIgQg9294
+# cV5O/dGKJ28Ji2emEDInEqcpqeZ1ObYyeY5qpJ4wgbkGCyqGSIb3DQEJEAIvMYGp
+# MIGmMIGjMIGgBCDYuTyXZIZiu799/v4PaqsmeSzBxh0rqkYq7sYYavj+zTB8MGWk
 # YzBhMQswCQYDVQQGEwJVUzEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9u
 # MTIwMAYDVQQDEylNaWNyb3NvZnQgUHVibGljIFJTQSBUaW1lc3RhbXBpbmcgQ0Eg
-# MjAyMAITMwAAAFck05XgounJMQAAAAAAVzCCA2EGCyqGSIb3DQEJEAISMYIDUDCC
+# MjAyMAITMwAAAFXZ3WkmKPn44gAAAAAAVTCCA2EGCyqGSIb3DQEJEAISMYIDUDCC
 # A0yhggNIMIIDRDCCAiwCAQEwggEJoYHhpIHeMIHbMQswCQYDVQQGEwJVUzETMBEG
 # A1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWlj
 # cm9zb2Z0IENvcnBvcmF0aW9uMSUwIwYDVQQLExxNaWNyb3NvZnQgQW1lcmljYSBP
-# cGVyYXRpb25zMScwJQYDVQQLEx5uU2hpZWxkIFRTUyBFU046NzgwMC0wNUUwLUQ5
+# cGVyYXRpb25zMScwJQYDVQQLEx5uU2hpZWxkIFRTUyBFU046N0QwMC0wNUUwLUQ5
 # NDcxNTAzBgNVBAMTLE1pY3Jvc29mdCBQdWJsaWMgUlNBIFRpbWUgU3RhbXBpbmcg
-# QXV0aG9yaXR5oiMKAQEwBwYFKw4DAhoDFQD9LzE5nEJRAUE2Ss3xaKKPXHnLw6Bn
+# QXV0aG9yaXR5oiMKAQEwBwYFKw4DAhoDFQAdO1QBgmW/tuBZV5EGjhfsV4cN6qBn
 # MGWkYzBhMQswCQYDVQQGEwJVUzEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0
 # aW9uMTIwMAYDVQQDEylNaWNyb3NvZnQgUHVibGljIFJTQSBUaW1lc3RhbXBpbmcg
-# Q0EgMjAyMDANBgkqhkiG9w0BAQsFAAIFAO2vgIowIhgPMjAyNjA1MTMyMjU4MTha
-# GA8yMDI2MDUxNDIyNTgxOFowdzA9BgorBgEEAYRZCgQBMS8wLTAKAgUA7a+AigIB
-# ADAKAgEAAgIg6wIB/zAHAgEAAgISdDAKAgUA7bDSCgIBADA2BgorBgEEAYRZCgQC
+# Q0EgMjAyMDANBgkqhkiG9w0BAQsFAAIFAO2vV68wIhgPMjAyNjA1MTMyMDAzNTla
+# GA8yMDI2MDUxNDIwMDM1OVowdzA9BgorBgEEAYRZCgQBMS8wLTAKAgUA7a9XrwIB
+# ADAKAgEAAgIucAIB/zAHAgEAAgITNjAKAgUA7bCpLwIBADA2BgorBgEEAYRZCgQC
 # MSgwJjAMBgorBgEEAYRZCgMCoAowCAIBAAIDB6EgoQowCAIBAAIDAYagMA0GCSqG
-# SIb3DQEBCwUAA4IBAQBEmHymAELchIxQI4Dms3UpUbgPd0dD9+Rcm3fc1vKkaEIJ
-# tVhbqvK7iarLvC5vY9KvS3klE8OJDpP6M6w/apm+YOdDz97eY0Jc0EnOsKEW7e6U
-# 6/2I3ertK1rIQuZ5Cg0+S+kweI7feID4s+3iqmMcOMhGXrPdyrVfzaK5SHi2ChIG
-# EdL6mDk4GGmwshJDfp+0GHQWMIu65hVLEYW/6sTnbgSwP8PkdaTqEf5HKEjJoqtS
-# E8aEJ4msoICtSUMe0G0lrEbovnOFPIl7CHc04IkIfNFLxpaZjKsire6SHWJGP7DI
-# XwA+dNbqpdWyxLz+f0OcMlOxY+aArgY1xuxpgu5xMA0GCSqGSIb3DQEBAQUABIIC
-# AE8fz6/VIIOoBp71xAWO06jKBHcnlDZk/3CHecEDI852EkYEqgrpvaUgIATxbW+w
-# nHb9lHsIamdBDmF8/3tlz/zJz+FQQepsj9SEjrP34ychWD9bXvvDywNYB66GCefz
-# m6sErQXMVebceoyr4wMXK2AjGKu2ScAvOFR/MCVvsZpob610IS5UEQVCG+PbIPcI
-# 4P6seNGxlfP18T/gzbSssWF5bPxnEODqcz7Z7DMjqnCgEEsF9l0/Rn5JQwhVcuvC
-# vedEDKSs9BTbYvvm7YHnE5ZFnwF1bP+fsYYbqJguGsWsaIO1qusJy1Wj7ZYqdjWz
-# +XizoMgTzT3upG/a98+agXCK4BxBaqDjQCs528jNnvoqFIE6YO80jrEWH9EsCfy8
-# tkW4iifQE1uOZEIK22ROLqjEg5cA/8ITp5P7yfCL539XrG9HxqT/ErZ6Qlz0pbN6
-# KhqsifnP5mr2CJ/UmQQZJad+PrWL2W98n+MxcDtfcTPPdLA1EiB07J9QK7n+pHtu
-# F1vx0GiLtA7dwYZPmB+6Kt9ByvB/IukPhy1RbXky+ST7MjHydO57uniSsAWYSI6s
-# LvHBaG2AM1rgGRmTVaYaL4e5KX2d++mQDvHyER14tKSjQS8SFkzd8cRu6AgX+BKB
-# GLFmDO3VZB0SEH6KphZFYOikd3ZcETuXrBWwZMQlbZnR
+# SIb3DQEBCwUAA4IBAQCAY2kCaZ5ayUG3ZCTpY0l6lQ7J8tCAVQ9FwOiNAJHMvc9Q
+# Ef2n8GATLkJj3C76bO5DnZ3C3dp62SQ7PMmiziKcqfXJwtirxE3mWgpOztLgtGhr
+# n901pAQz25AvZGbhrHIbQ7aL9ohR/r63mKJia2/Uf0+Vipl/s4LfEhfBIWk+kKhv
+# QATwHhhx4z5/X0yAXhJvJyvnz/J1qEmywzDbMDI23rjfdqogEnGXQHBOw/K0jO4J
+# v416glecP0gP0u3fW+W4SIQ1vbzRB/WY8Y24y02m3eGYy2XwxQCqB4Ssk8raWwD8
+# IV5/4H9RYiXLyx6ZEcyi+LTYeCVXvfnG5VCpyFtOMA0GCSqGSIb3DQEBAQUABIIC
+# AGSaJS6CCa7fh11BStsZYnqnVmyh8VanAWCg2xrITbscjfn5a4Isr7rpt977VmAd
+# +oh9Zbo6K9u9CwOElBSi7Ld1SDjQGaSH9t44x2XDiXSGprNitbDJQyqTgg2Jd9Px
+# fE2wqUHhXR8R4llwa1ZPETZeKepxhafKtcRBA7vvK6G0tsqYoAQ4bQvaw5wuhMg3
+# 2ZJho8vMFy7cNvejDJJmVCL7ld+V90OMDaNbP1sndh1JvYfhtsd9SOZkUXPgst2h
+# 7chnBxEuIgEod/IYxxnWK6mVnL5srZ7/A/Eg0hPpaLKYSJMn8wMfK03bi4xMOIRw
+# EwgSQI+Fntxc6DSWJLxONCuS8SBfcBh8A9URoTKswvW9ofNjWoBUVxAuA3tcsGGu
+# zdzs+y8d+GmZTpsDBOKhlcXFv7GvhSNksQcDUvmquQ8jwEasVXIb9p9xkUlQNhtq
+# jCYptkBiOA22SEWSDRbWxaTht+ITvTFt1uSujf5PmELh+IE4tyRCHSbhoxzLTzqR
+# VtxrEfsl+5PmdY2AUs2x1O8/hiOKUHYAFqtb4gmMaQ6ejPYv+/1/W/oqypxe3wZj
+# P71xuPjwP61aH0B5+rb4AjjHM+DkTxtyd5kMTFRbql+G8vb68nNY8VcVxtR7O96A
+# hBITVdALU76CkICvoj6z20Lwu7bO9hVZy/MIG7R1UoOT
 # SIG # End signature block
