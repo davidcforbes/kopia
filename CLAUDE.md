@@ -199,6 +199,39 @@ look for UI source code in this repo.
 - Policy system is hierarchical: global → host → user@host → path.
 - Format versioning (`repo/format/`) supports multiple versions for backward compatibility.
 
+## Rule 3 — Performance work on backup-mirror: consult the optimization landscape
+
+Before designing any speedup to `backup-mirror` (parallelism, change
+detection, I/O patterns), read the **Performance optimization landscape**
+section in [`ARCHITECTURE.md`](ARCHITECTURE.md). It is the authoritative
+inventory of NTFS change-detection primitives and parallelism opportunities
+researched 2026-05-15, and it includes the "what *not* to do" list.
+
+Quick-reference rules that often trip up first-time optimization passes:
+
+- **Check task priority first.** Windows Task Scheduler defaults to
+  BelowNormal when `<Priority>` is omitted from XML. Propagates to all
+  child processes. Causes ~3x slowdown silently. See
+  `reference_taskscheduler_priority_default.md`. If a backup feels much
+  slower than expected, this is the first thing to check.
+- **We are I/O-bound, not CPU-bound.** SHA-256 hashing already has ~2.5×
+  headroom over D:\ throughput. Multi-threaded hashing buys nothing.
+  Don't reach for `rayon::par_iter` over chunks.
+- **VHDX RCT is the wrong API for our case** (wbadmin output isn't
+  Hyper-V-owned). Use `FSCTL_USN_TRACK_MODIFIED_RANGES` + `USN_RECORD_V4`
+  instead — it works on plain NTFS. (Closed bead kopia-44w; live bead
+  kopia-61n.)
+- **Parallelism in cbt mode is harmful.** Multiple concurrent readers on
+  the same physical E:\ head thrash (-30 to -50% throughput). Keep N=1
+  for cbt mode. File-level parallelism is great for blob mode only.
+- **The big win for torn-recovery** (the 5-hour failure mode we hit
+  on 2026-05-15) is pipelining the rehash phase (E:\ reads) and the main
+  loop (D:\ reads) on two threads — disjoint physical disks. See
+  kopia-c90.
+- **Don't introduce tokio.** No network I/O, no async I/O benefit on
+  Windows without IOCP, pure tax. The existing `std::thread` +
+  `crossbeam::channel` pattern is the right Rust stack here.
+
 ## Workflow conventions
 
 - Use `bd` for ALL task tracking — not `TodoWrite`/`TaskCreate`. See

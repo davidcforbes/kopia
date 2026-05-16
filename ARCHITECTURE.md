@@ -186,6 +186,65 @@ change. Recreate steps for a fresh machine live in
 on backup-monitor, that sibling is part of the build graph; touching
 its API can break this app.
 
+## Performance optimization landscape (backup-mirror)
+
+Research compiled 2026-05-15 after a 5-hour torn-recovery WIB run exposed
+how much wall time the current single-threaded full-hash-pass design costs.
+This section is the authoritative inventory of available primitives. Treat
+it as the menu when designing speedups; cite which option you're picking.
+
+### NTFS change-detection primitives
+
+Ranked by usefulness for our workload. All are documented Windows APIs
+unless noted.
+
+| Primitive | Granularity | Skips hash pass? | Stability | Notes |
+|---|---|---|---|---|
+| **`FSCTL_USN_TRACK_MODIFIED_RANGES` + `USN_RECORD_V4`** | byte ranges (≥64 MB rounded) | **Yes** | Win10/Server 2016+ stable | The big find. Plain NTFS, no Hyper-V. Per-file dirty extents. Reports over-round (~16× per chunk) but never under-reports — safe. See [[kopia-61n]]. |
+| **USN journal V2/V3** | file | No (file-level only) | Win2K+ stable | Good outer filter: "did this file change since cursor X". `usn-journal-rs` crate. See [[kopia-1tr]]. |
+| **`FSCTL_QUERY_ALLOCATED_RANGES`** | allocated byte ranges | partial (skips unallocated) | XP+ stable | For sparse VHDX. Strict improvement over `is_all_zero(buf)` post-read check. See [[kopia-dyj]]. |
+| **`GetFileTime` LWT** | file | No | always | Free via `std::fs::Metadata`. Useful tertiary signal. |
+| **`FILE_ATTRIBUTE_ARCHIVE`** | file | No | always | Contested with wbadmin (both clear it). Don't touch. |
+| **VHDX RCT (`QueryChangesVirtualDisk`)** | byte ranges | Yes — *if RCT enabled* | Server 2016+ | Requires Hyper-V owned + RCT enabled at write. wbadmin output doesn't qualify. **Rejected for our case** (formerly tracked as kopia-44w, closed). |
+| **`$MFT` / `$LogFile` direct read** | file (MFT) / none | No | undoc / unstable | Same info as `FSCTL_ENUM_USN_DATA`. Skip. |
+| **VSS differential snapshot mgmt** | none (mgmt only) | No | stable | `IVssDifferentialSoftwareSnapshotMgmt` manages diff-area storage, doesn't expose `Diff(A, B)` to userspace. Skip. |
+| **`ReadDirectoryChangesW`** | file | No (real-time only) | stable | Wrong semantics for "since last run". Skip. |
+| **`FSCTL_LOOKUP_STREAM_FROM_CLUSTER`** | cluster→file | No | stable but slow | Docs explicitly warn "very resource-intensive". Forensic tool, not change-tracking. Skip. |
+
+**Implementation order if optimizing the VHDX path**: (1) ALLOCATED_RANGES preflight for cheap win on sparse files → (2) USN V4 range tracking for the big win → (3) ignore RCT entirely.
+
+### Parallelism opportunities
+
+Disk envelope on the current host:
+- **D:\\** (NVMe-ish, ~500-1000 MB/s sequential): tolerates QD≈4-8.
+- **E:\\** (slower, ~150-200 MB/s sustained): seek-bound. Optimal QD=1-2 sequential, ~4 mixed. Multiple parallel readers *thrash* the head on a spindle.
+- **CPU**: SHA-256 ~2 GB/s/core via `sha2` crate. We are I/O-bound, not CPU-bound. Multi-threaded hashing buys nothing.
+
+Ranked by impact:
+
+| Opportunity | Workload | Mechanism | Wall-clock win | Notes |
+|---|---|---|---|---|
+| **Intra-file rehash↔main pipeline** | cbt torn-recovery | `std::thread` + `crossbeam::channel(4)` | ~45% reduction | Two phases touch disjoint physical disks. See [[kopia-c90]]. |
+| **File-level parallelism N=4** | blob mode (Tree-A) | `rayon::ThreadPool` | ~2x (Tree-A) | Stat+open latency dominates for small files. Restic/Kopia precedent. See [[kopia-0cj]]. |
+| **File-level parallelism for cbt** | cbt mode (Tree-B) | — | **Negative** (-30 to -50%) | Multiple readers on the same E:\\ head thrash. Keep N=1 for cbt mode. |
+| **Multi-threaded chunk hashing** | any | `rayon::par_iter` | None | Hashing not the bottleneck — 2.5× headroom over D:\\ throughput. Skip. |
+| **Cross-file pipelining** (rehash of B during main of A) | cbt | — | **Negative** | Two concurrent E:\\ readers/writers thrash. Skip. |
+| **`tokio::fs` async I/O** | any | tokio + windows-rs | None today | Tokio's `tokio::fs` is a blocking-stub thread pool, not IOCP. No payoff without independent QD demand. Defer. |
+| **`ReadFileScatter` vectored I/O** | rehash on fragmented dst | windows-rs direct FFI | Marginal | Sequential reads already kernel-readahead-optimized. Defer. |
+| **Process priority bump** | any | scheduled task `<Priority>5</Priority>` | ~2-3x measured | See [[kopia-8ag]] and `reference_taskscheduler_priority_default.md`. **Apply first** — biggest single bang for the buck. |
+
+**What *not* to do**:
+- Don't introduce tokio. No network I/O, no async I/O benefit, pure tax.
+- Don't multi-thread chunk hashing — we're I/O-bound.
+- Don't parallelize files in cbt mode — head contention erases the win.
+- Don't bet on RCT — wrong API for wbadmin output.
+- Don't write a minifilter driver — USN V4 obviates it.
+- Don't use mmap on multi-TB files — see `reference_mmap_multi_tb_windows.md`.
+
+Sources for both subsections live in the closed/in-progress bead histories
+(`bd show kopia-44w`, `bd show kopia-61n`, etc.) — the research reports
+themselves are linked from those bead notes.
+
 ## When to update this doc
 
 - Any new binary or task added to the chain.
