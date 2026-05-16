@@ -384,3 +384,46 @@ CBT layer:
 The bead `kopia-vzu` (P2 follow-up) is still open and should be
 updated with this finding; the diagnosis fix it described
 (`--modify-window=2`) is not what we shipped.
+
+## Final resolution (2026-05-16, epic `kopia-bmy`)
+
+The `--modify-window=2` / rsync-tuning path was abandoned in favor
+of replacing rsync entirely with a native Rust chunk-CBT mirror
+(`backup-mirror.exe`, repo `C:\dev\backup-monitor`). The hypothesis
+that rsync's rolling-checksum mechanism is fundamentally wrong for
+multi-TB mostly-zeroed VHDX files held up under deeper analysis:
+no rolling-checksum tuning can avoid reading the whole file when
+the basis differs by >1 TB from a killed prior run.
+
+Cutover landed in commit `67df89d7` (2026-05-13). `kopia-vzu` was
+closed at that time. The new flow:
+
+- One `backup-mirror.exe` invocation per top-level subtree on the
+  D:\ shadow (`KopiaRepo`, `WindowsImageBackup`, …).
+- 4 MiB chunk-CBT manifests on `C:\BackupMirror\state\` (NVMe,
+  isolated from D:/E: I/O).
+- `WindowsImageBackup` uses `--manifest-key basename` so wbadmin's
+  nightly dated-folder rotation doesn't invalidate matches.
+- Replica `summary` line in `daily_kopia.log` carries
+  `tool=backup-mirror` plus `chunks_changed`/`chunks_total`.
+
+Post-cutover wall-clock on this host: typically ~1 h end-to-end,
+with one ~5.5 h outlier on 2026-05-15 during a torn-recovery rehash
+(addressed by bead `kopia-c90`'s producer/consumer pipeline + bead
+`kopia-xl2`'s rehash-progress events). 10+ consecutive clean
+nightlies as of 2026-05-16.
+
+The 4 h `ExecutionTimeLimit` on `\Backup\DailyDReplica` is
+deliberately retained: tightening to 2 h would cover the
+steady-state envelope but the torn-recovery outlier shows the
+headroom is sometimes used. The scheduled-task XML
+(`scripts/scheduled-tasks/DailyDReplica.xml`) is the authoritative
+source if a fresh host needs to re-register.
+
+Related closures: `kopia-bmy.1` (probe), `kopia-bmy.2` (build),
+`kopia-bmy.3` (parallel-eval, superseded), `kopia-bmy.4` (cutover),
+`kopia-bmy.6` (BD exclusions), `kopia-bmy.7`/`kopia-bmy.9`
+(finally-block share-violation), `kopia-bmy.8` (ACL workaround),
+`kopia-c90` (pipelining), `kopia-ag6`/`kopia-8j4` (trust marker),
+`kopia-8fc` (dst alignment), `kopia-10r` (alignment logging),
+`kopia-xl2` (rehash progress events).
