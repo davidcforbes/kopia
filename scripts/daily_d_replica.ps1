@@ -49,15 +49,34 @@ function Write-Log {
     Write-Host $line
 }
 
+# Probe WinRT toast availability ONCE at startup (kopia-ytq). Background /
+# non-interactive PS hosts (manual recovery runs, service contexts) can't load
+# the WindowsRuntime UI assemblies; previously every Show-Toast call hit the
+# same failure and logged the same noisy 'toast emission failed' line. Probe
+# once, cache the result, downgrade subsequent skips to a single explanatory
+# line.
+$script:ToastsEnabled = $true
+try {
+    [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]
+    [void][Windows.Data.Xml.Dom.XmlDocument,                  Windows.Data.Xml.Dom,        ContentType=WindowsRuntime]
+} catch {
+    $script:ToastsEnabled = $false
+}
+
 function Show-Toast {
     param(
         [Parameter(Mandatory)] [string]$Title,
         [Parameter(Mandatory)] [string]$Body
     )
     if ($InitialSeed) { return }   # interactive seed run: no toast
+    if (-not $script:ToastsEnabled) {
+        if (-not $script:ToastSkipLogged) {
+            Write-Log "toasts disabled (WinRT type-loading failed -- non-interactive session); silently skipping further Show-Toast calls" 'toast'
+            $script:ToastSkipLogged = $true
+        }
+        return
+    }
     try {
-        [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]
-        [void][Windows.Data.Xml.Dom.XmlDocument,                  Windows.Data.Xml.Dom,        ContentType=WindowsRuntime]
         $enc    = { param($s) [System.Security.SecurityElement]::Escape($s) }
         $titleX = & $enc $Title
         $bodyX  = & $enc $Body
@@ -580,8 +599,8 @@ finally {
 # SIG # Begin signature block
 # MII9bgYJKoZIhvcNAQcCoII9XzCCPVsCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDLyMISCC2RSIdv
-# jh158DWjslM6G6TpfcsqK9XmEcV+zKCCIjAwggXMMIIDtKADAgECAhBUmNLR1FsZ
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDJampTPm+p8K5a
+# FZaXd8746C5igcwLwbKpuyhmtpntDaCCIjAwggXMMIIDtKADAgECAhBUmNLR1FsZ
 # lUgTecgRwIeZMA0GCSqGSIb3DQEBDAUAMHcxCzAJBgNVBAYTAlVTMR4wHAYDVQQK
 # ExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xSDBGBgNVBAMTP01pY3Jvc29mdCBJZGVu
 # dGl0eSBWZXJpZmljYXRpb24gUm9vdCBDZXJ0aWZpY2F0ZSBBdXRob3JpdHkgMjAy
@@ -768,20 +787,20 @@ finally {
 # cmF0aW9uMSswKQYDVQQDEyJNaWNyb3NvZnQgSUQgVmVyaWZpZWQgQ1MgRU9DIENB
 # IDAzAhMzAAEQB7JfAW3AtcBgAAAAARAHMA0GCWCGSAFlAwQCAQUAoF4wEAYKKwYB
 # BAGCNwIBDDECMAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwLwYJKoZIhvcN
-# AQkEMSIEIHFUsMPD+J6gqFEBiBPJ3sv8HMYRq7JwdEMdO40ygROmMA0GCSqGSIb3
-# DQEBAQUABIIBgHdC0XuZfJBW3nq/HjzcctJ3qKLFTW36Tqx2zQVf1IIdX6QnUzhF
-# qO2ImUwFM0sDImbKsUyYoIyVMyC/jt28xyQQmaJj8gdhJYFTQlEWsLQgEYxExrvD
-# hi8HmpOv53IlIy4pUMTW6fkR8FxJAVrTyW6tSYihJXNkyABr419MksddxcqJSHH4
-# jVwmGQlJQdIUh+9cbTmpL6f3BZlaZ77G32+riNK300PVbTB42geoYbdE8BN+PhBC
-# yVdv/vBEzjMjA1P2veo5YW214kTexAAN8U/ku12/kuPYbzKolQLxw5TdIwe/9LYw
-# 3WzDbDT0i0abYsBYy1yOC9fJaOLkC8nCjjA6j4KA0+sc8z3MgYMuPfyRHzfpKZXp
-# vQZxT6zI3jCxdWfgjmPM0PTV+pC5zsVNWJCpqm4JyIbj/pNf0jiuu5UaHFByKlED
-# /RJrDrdsXzGCV0+/X88obry9kB97CfMrNpUZibaLzL4mix7deXaMYW1xCDgRUkXE
-# A6ntHS2g+AkTUaGCGBQwghgQBgorBgEEAYI3AwMBMYIYADCCF/wGCSqGSIb3DQEH
+# AQkEMSIEIBTmLLAHhFeFgIecbXF18OCaqj/5Pac7Quv1mvZPOypqMA0GCSqGSIb3
+# DQEBAQUABIIBgGxsZKOJdOhiSbJYYVvkgKiYsq8xUYx2jkUWo5YQUXYXzeTWSXv2
+# xcDkcVkyqHZYLwKomdmtZJpMGwvFBM6drxEIw6yHNd3/7UPka5QqSHzzrUig2n+B
+# c9v2+gVxzA7WOsszzCfkKK27UGwj52lwV9rDoOyQbbEToDjDBlv5ioT3ydCT9kV5
+# YtsTvBImqrpxaUaw3rHfoaDQoZi9S4uR1EPAi0CPIp0zXhPuhybMc38lT8+aL+4E
+# EpDacOhk16sjBsjlEOuTbCuw1ziRwB1Xjk16BEA9ERt/OvEue153EoVAJxOvfmke
+# hat2un65IaPLabjJAukb3WiLdeL5YfggzkHY1RqJ1iiWeL+PuVx4u9yxwCPg3CMX
+# v8qnuojBiTT6Y5XjOWaXms9U3Nr2QzdSRGwuVmQBhloSSpJHlk2NN9s7KIdZHxD1
+# yElc2I8667FDTmx5afrlgMmDUziB5bMCdRsYlvulGQyErkUOIF1mV1tpqQpFv6O6
+# sw5lOe8QD1pzmqGCGBQwghgQBgorBgEEAYI3AwMBMYIYADCCF/wGCSqGSIb3DQEH
 # AqCCF+0wghfpAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFiBgsqhkiG9w0BCRABBKCC
-# AVEEggFNMIIBSQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCDOzg/V
-# dvQvpGNXclcEgWqKb/ImAeHtaLGHtinVVUumIQIGaeiBKKtSGBMyMDI2MDUxNjE1
-# Mjg1OC4xMDlaMASAAgH0oIHhpIHeMIHbMQswCQYDVQQGEwJVUzETMBEGA1UECBMK
+# AVEEggFNMIIBSQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCA91Q98
+# wmpDY2HOV/iF0PAceNfWnR2GjmOXJVURGdH8NwIGaeiBKK4uGBMyMDI2MDUxNjE1
+# MzYzNC43NjZaMASAAgH0oIHhpIHeMIHbMQswCQYDVQQGEwJVUzETMBEGA1UECBMK
 # V2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0
 # IENvcnBvcmF0aW9uMSUwIwYDVQQLExxNaWNyb3NvZnQgQW1lcmljYSBPcGVyYXRp
 # b25zMScwJQYDVQQLEx5uU2hpZWxkIFRTUyBFU046N0QwMC0wNUUwLUQ5NDcxNTAz
@@ -871,8 +890,8 @@ finally {
 # dGlvbjEyMDAGA1UEAxMpTWljcm9zb2Z0IFB1YmxpYyBSU0EgVGltZXN0YW1waW5n
 # IENBIDIwMjACEzMAAABV2d1pJij5+OIAAAAAAFUwDQYJYIZIAWUDBAIBBQCgggSf
 # MBEGCyqGSIb3DQEJEAIPMQIFADAaBgkqhkiG9w0BCQMxDQYLKoZIhvcNAQkQAQQw
-# HAYJKoZIhvcNAQkFMQ8XDTI2MDUxNjE1Mjg1OFowLwYJKoZIhvcNAQkEMSIEIMs7
-# ZIoxQ67flGL+zMJTjtvlPx9dbO1gVOgbA5wBTKUBMIG5BgsqhkiG9w0BCRACLzGB
+# HAYJKoZIhvcNAQkFMQ8XDTI2MDUxNjE1MzYzNFowLwYJKoZIhvcNAQkEMSIEIJWx
+# vvD06WfCOCgJwTy5LpRbWL3YVEgqYNB1UyPABUHWMIG5BgsqhkiG9w0BCRACLzGB
 # qTCBpjCBozCBoAQg2Lk8l2SGYru/ff7+D2qrJnkswcYdK6pGKu7GGGr4/s0wfDBl
 # pGMwYTELMAkGA1UEBhMCVVMxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlv
 # bjEyMDAGA1UEAxMpTWljcm9zb2Z0IFB1YmxpYyBSU0EgVGltZXN0YW1waW5nIENB
@@ -895,15 +914,15 @@ finally {
 # XQzBm4IBkbyLmiN6a3v9/UMrpKQ5elXnf2yy26SeB0DNqxOki3/3POA2Wr6ukgn3
 # IsrXszMONR1oTw2gEzl9iSrg6BG9H4wLoAsitBN1rDyd/TTU/9kSEGmOtPgbIkVC
 # NemohHJN3lKvQfZXutcbYB93VgyB0lyVRSKm/Dem6zANBgkqhkiG9w0BAQEFAASC
-# AgBJEcjSJqruIow3onrBAg/ZmRPBu8936N40wg1zwgXKipxdzVzhodiBjRX2EQMa
-# ZeHsMEfEV8lf3bg2jJR6T3YdSpQaZBsB5Iex81pKKyG100vt/jC7nGu3INLesWlh
-# HfJJwW6+3a6qa1OUfWCdGJvHLmzkuuJ2VKGkoN7gOson5P8ZpFmr8t6w7XXHFqI9
-# q6W/vn264uGggUzVrRMIqa/iwX2Lpn9LXCZZPizl+Ty1nXB9hSp2fbvmMQIeAQD6
-# PizY7bcHJykMQD5Z89GNp7Us2agznAB0lKcZXXURVsyZVu/U5QmkgPBgfxnzqoe6
-# VJ3PDSU/symL0uy4cQoM35P/+bF4Xy4XQGu7FPSoC6pU+WFaUGxR57oZlQnjjj8y
-# WbvGqWCQ5rzr6aLiYbgeCUSycMgyJDeQ+++jw0zG+VSQ9AdVbT7mkAlcYn+N6TkK
-# kWmIjBMCtN9vhI971ZamrB7TqgqEZQsIBp0u9cTm9CnVAAhYdssz2OMJWU9UFwL0
-# kyBotsJLapTfRti5bpRE7lSBRiixVTpQ7WjMNgx++dWAcVm0rFVxy1iNwqSY+lWa
-# h+2/7zZ8sb1gP2eogr8Z5knVgYEd8rC69o4QjK+bAMtxGl5OGFzBG6ZI3RcIPSk0
-# Uh1y0aJ3KUD3hQKCojayEpk2GySfg4a8SSCSlE++v1b49A==
+# AgBeej5QhbZ1kLoR17o2+qJ1ciF55eG0OF1Ty9qUrcZE9LDTluQrrQIfF/eSo3IK
+# nOc9hxkj/behfBe8Qa4EdUjqSisnv6pWG+sqGhrcqZCZ0Dpe7pD4kbChuX8DgKGE
+# 8C9og/bTee79GTZEqyY6O7hDC4jwjskWGQZsYufLPHmRAfe9T67N9hM9LxoyW18Z
+# y2jfCdBvBGSPX3xxqt3NIm53+uKrD3RMKQRMZtKGzbXSMJqE6hI4Q+1vp53Cvk/M
+# 3Ye+PNE3oPFY4DcXTBDcu59VKH+Oj3eM/SCrDFZWyleUPIqVS6M49zu0uriQLxzZ
+# 7BNYLBrUEbDx1TnW71LTtW1yBjKteLjASU1wXa6eiet8B2/p2WMMLGJKVJgA70v9
+# OJFcQapwufCcTTGkRFFi7wjXhu2XUOV5ouMOs3Pq0p/QhgIqDrmxtSs1dzhwYERd
+# Ol6T8Q93N27QVSvsHjjKz+MjH6TUTg3mnfsPxeazIDxhishWFPl6RNYbG0hQ02kw
+# liP0xDjqIYXj9tSFgIYHKki646NbJRF1/p7u5eEg1IXIuPQJjioO2zrCLtHNBCAE
+# 0u1C+SjHvrrlQvEBGTpJq7IoGNW8AkK25OgNW5R3PpMruMnFvGQbnvHSgeFmxXnU
+# TEz/lxDIATggPnllDbxoTTcUhMvFvujCk2qGzLz+vZAp+Q==
 # SIG # End signature block
