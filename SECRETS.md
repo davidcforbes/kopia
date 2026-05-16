@@ -34,6 +34,57 @@ The branch separation that used to hide `scripts/` (the
 secrets work — the protection has always come from these three
 layers.
 
+## The single point of failure (kopia-1yn)
+
+`scripts/.kopia-pw.dat` is the **only piece of state in this entire
+backup architecture whose loss is permanent**. Every other DR concern
+(kopia.exe, scripts, binaries, certs, even the encrypted repository
+itself) is reconstructable from network resources or git.
+
+The encryption is sound: the DPAPI-LocalMachine blob is machine-bound,
+so even a leak elsewhere yields useless ciphertext. The flip side is
+that the blob is useless on a different machine. The repository at
+`D:\KopiaRepo` / `E:\KopiaRepo` can only ever be decrypted with the
+underlying password supplied on a fresh machine. **If the password is
+forgotten AND not stored externally, the data is mathematically
+unrecoverable** — by design of kopia's encryption.
+
+Therefore the password MUST live in at least one external store:
+
+- **Primary**: a password manager (1Password, Bitwarden, etc.).
+  Label the entry clearly — e.g. *"Kopia Repository Password
+  (CHRISLAPTOP2) — recovery from D:/E: requires this; see
+  C:\dev\kopia\SECRETS.md"*. The password manager must be accessible
+  from a fresh machine without needing this laptop.
+- **Belt-and-suspenders**: a printed copy in a physical safe.
+- **Optional**: a GPG-encrypted copy on a USB stick stored offsite,
+  decryptable with the user's GPG key (which is itself separately
+  backed up).
+
+Once on a fresh machine, the recreate procedure below regenerates the
+DPAPI blob from the externally-stored plaintext password.
+
+### Verification procedure
+
+To confirm the password actually works without testing it
+destructively on the production blob:
+
+```powershell
+# 1. On a second machine (or after temporarily renaming the existing
+#    .kopia-pw.dat on this one), recreate the DPAPI blob from your
+#    password manager via the Recreating section below.
+# 2. Connect read-only to the replica copy on E: (so a wrong password
+#    can't corrupt anything on D:):
+$env:KOPIA_PASSWORD = '<paste plaintext from password manager>'
+kopia repository connect filesystem --path=E:\KopiaRepo
+kopia snapshot list --all | Select-Object -First 5
+kopia repository disconnect
+Remove-Item Env:KOPIA_PASSWORD
+```
+
+If `snapshot list` returns snapshots without an authentication error,
+the password is correct and the password-manager entry is verified.
+
 ## Recreating `.kopia-pw.dat` on a fresh machine
 
 ```powershell
