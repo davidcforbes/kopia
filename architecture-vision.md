@@ -206,6 +206,71 @@ migration to OSS-quality engineering practices**: config files
 instead of hardcoded paths, AST-validated scripts (or pure Rust),
 documented IPC protocol, portable secret-storage abstraction.
 
+### 4.10 VSS shadow-copy paths are a separate AV-exclusion namespace from live paths
+
+Added 2026-05-15. Bitdefender consumer's on-access scanner intercepts
+file reads at the minifilter layer and sees the *bare NT
+object-manager path*
+(`\Device\HarddiskVolumeShadowCopyN\dev\kopia\scripts\...`) when a
+backup tool reads a file through a VSS shadow. Live-volume path
+exclusions (`C:\dev\kopia`) do **not** propagate to shadow access —
+the exclusion engine matches the literal path string the kernel
+sees, not the canonical live-volume equivalent. Empirically
+verified 2026-05-15 (`kopia-bhw`): the DOS-namespaced form
+(`\\?\GLOBALROOT\Device\...`) is silently ignored; only the bare
+NT form with `*` wildcards on the shadow number works. **The new
+architecture must, at install time, configure AV exclusions for
+BOTH the live paths AND the corresponding shadow namespace
+(`\Device\HarddiskVolumeShadowCopy*\<rel-path>\*`).** Recorded as
+`reference-bd-shadow-copy-exclusion`.
+
+### 4.11 Wbadmin's dst-folder rotation breaks "stable destination" assumptions
+
+Added 2026-05-15. `wbadmin` creates a fresh dated folder per backup
+(`Backup 2026-05-15 090023` → `Backup 2026-05-16 …` the next night)
+and keeps only the latest on the source side. Any mirror tool that
+keys per-file state by basename (e.g. backup-mirror's per-VHDX CBT
+manifest) needs the wrapper to **rename the destination dated
+folder to match source before invoking the mirror** — otherwise
+every rotation creates an empty new dst path, the basename manifest
+matches nothing on disk, and the post-preflight torn-recovery
+rewrites the full ~2.7 TB. We hit this on 2026-05-15 and burned
+5+ hours of disk time before fixing it (`kopia-8fc`). **The Backup
+Server's job DAG must model "destination-path-aligned" as a
+pre-step on workers that operate on rotating-name source trees,
+not bury it inside the worker.**
+
+### 4.12 Scheduled tasks silently inherit BelowNormal priority
+
+Added 2026-05-15. Windows Task Scheduler defaults `<Priority>` to
+7 (BelowNormal) when the XML omits the field, and that priority
+propagates to every child process the task spawns. We discovered
+this 2026-05-15 (`kopia-8ag`) when backup-mirror.exe was crawling
+at 148 MB/s effective throughput on a disk that can sustain 500+
+MB/s. Bumping the running PID to Normal restored expected speed;
+persistent fix needed
+`$task.Settings.Priority = 5; Set-ScheduledTask`. **The new
+architecture should set explicit task priority at server install
+time** — never trust the Task Scheduler default. Generalizes to:
+every Windows scheduling default that's optimized for "don't
+disrupt the interactive user" hurts unattended overnight work.
+Recorded as `reference-taskscheduler-priority-default`.
+
+### 4.13 Producer/consumer log-format coupling is silent-fail by design
+
+Added 2026-05-15. Variant of lesson 4.2.
+`backup-mirror.exe`'s wrapper (`daily_d_replica.ps1`) writes
+` -- replica summary k=v …` to `daily_kopia.log` after every
+replica run. `backup-dump.exe`'s parser at `data.rs:545` looked
+for ` — replica summary ` (em-dash) or ` - replica summary `
+(single hyphen). Double-dash was silently skipped, so the
+dashboard's "Replica last OK" was frozen at the last rsync-era
+em-dash entry (2026-05-11) for four nights even after successful
+backup-mirror runs. Fixed 2026-05-15 (`kopia-wp4`). **The Backup
+Server's worker contract — structured JSON-over-HTTP rather than
+log-line magic — removes this entire class of bug from
+existence**, and is the right reason to do it.
+
 ## 5. Architecture principles + component map
 
 ### 5.1 Three planes, hard boundaries
@@ -797,6 +862,90 @@ Windows-first, but design abstractions (e.g., `Volume` trait with
 `VssVolume` and `LinuxDmSnapshot` impls) that don't paint into a
 corner.
 
+### 6.7 NTFS change-detection primitives — making the file-tier worker fast
+
+Research outcome (2026-05-15, after watching a 2.46 TB torn-recovery
+rehash take 4.6 hours): Windows exposes documented primitives that
+let backup workers skip the full-file hash pass when the OS already
+knows nothing changed. Today's stack reads + hashes every chunk of
+every file on every run; the new architecture should consult these
+signals first and only fall back to full hashing when the signal is
+unavailable, ambiguous, or fails the trust gate.
+
+The primitives, ranked by leverage:
+
+| Primitive | Granularity | Skips hash pass? | Notes |
+|---|---|---|---|
+| **`FSCTL_USN_TRACK_MODIFIED_RANGES` + `USN_RECORD_V4`** | byte ranges (≥64 MB rounded) | **Yes** | Plain NTFS, no Hyper-V dependency. Per-file dirty extents reported by the OS. Reports over-round (~16× per chunk at 4 MiB) but never under-reports — safe for backup correctness. Enabled per-volume; persists across reboots. See `kopia-61n`. |
+| **USN journal V2/V3** | file | No (file-level only) | Standard NTFS change journal. The right outer filter: "did this file change since cursor X". `usn-journal-rs` crate. Tracks via `kopia-1tr`. |
+| **`FSCTL_QUERY_ALLOCATED_RANGES`** | allocated byte ranges | partial (skips unallocated) | For sparse VHDX files, eliminates reads on holes outright (vs the current `is_all_zero(buf)` post-read check that still pays the I/O). Documented since XP. Tracked via `kopia-dyj`. |
+
+What we **rejected** and why:
+
+- **VHDX Resilient Change Tracking (RCT)** — `QueryChangesVirtualDisk`
+  via `virtdisk.h`. Block-level CBT for VHDX, but only works when
+  the VHDX is owned by Hyper-V with RCT enabled at write time.
+  `wbadmin`'s output VHDXes don't qualify, nor does our QuickBooks
+  `.qbw` use case. Closed `kopia-44w` in favor of USN V4.
+- **VSS differential snapshot management** — the COM API exists
+  (`IVssDifferentialSoftwareSnapshotMgmt`) but only manages the
+  diff-area storage; there is no userspace `Diff(snapshot_a,
+  snapshot_b)` query exposed. Veeam built their own filter driver
+  to get around this; we don't need to because USN V4 covers our
+  case on plain NTFS.
+- **`$MFT` / `$LogFile` direct reads** — same information as
+  `FSCTL_ENUM_USN_DATA`, but undocumented format and slower. Skip.
+- **`FSCTL_LOOKUP_STREAM_FROM_CLUSTER`** — Microsoft's own docs
+  warn "very resource-intensive." Forensic tool, not
+  change-tracking.
+- **Custom minifilter driver** (Veeam-style) — was a serious option
+  in our planning until we found USN V4. With USN V4 in hand, a
+  driver buys us nothing on plain NTFS and adds a deployment
+  surface (driver signing, kernel-mode bugs) we shouldn't take on.
+
+Where these primitives slot into the architecture:
+
+- **Per-volume USN cursor state lives in the Backup Server.** The
+  server enables the journal + range tracking at install time,
+  persists `{journal_id, next_usn}` per volume in its state file,
+  and hands each backup worker a filtered "set of files (and
+  byte ranges within those files) that may have changed since
+  last run."
+- **Workers consume the signal as a hint, never as ground truth.**
+  The kopia-8j4 preflight (size-and-marker check) remains the
+  trust gate. If a worker is told "this file is clean" by the
+  USN cursor but `dst.len() != manifest.src_size`, the worker
+  falls back to full hash. The signal is for speed, not for
+  correctness.
+- **Journal-wrapped or first-run fallback is automatic.** If the
+  stored journal_id mismatches the volume's current journal_id, or
+  if stored `next_usn < first_usn` (wrap), the server hands the
+  worker an empty hint and the worker does a full pass. Never
+  silently skip when the journal can't prove cleanliness.
+
+**Expected impact (production-extrapolated from today's runs):**
+
+| Workload | Today (full hash) | With USN V4 + ALLOCATED_RANGES |
+|---|---|---|
+| KopiaRepo nightly (~27K immutable pack blobs, ~0 changes) | ~37 min | seconds |
+| WIB nightly (2.7 TB VHDX, ~99% unchanged blocks) | ~80 min | minutes |
+| KopiaRepo with active maintenance | ~37 min | seconds + write of new packs |
+| WIB after wbadmin GB-scale daily delta | ~80 min | minutes proportional to delta |
+
+This work is independent of the rustic_core embed (§6.0) — these
+primitives sit *between* the worker and `rustic_core::backup()`,
+filtering the file/range set before rustic_core's chunker even
+sees them. Restic-format compatibility unchanged.
+
+**Parallelism note:** see also §4 and CLAUDE.md Rule 3 — the
+architecture should bias toward intra-file pipeline parallelism
+(disjoint physical disks read concurrently, as in the `kopia-c90`
+torn-recovery pattern landed 2026-05-15) and *avoid* multi-threaded
+hashing or file-level parallelism in CBT mode where head contention
+on spinning destinations destroys throughput. Multi-threaded
+hashing in particular buys nothing because SHA-256 is already 2.5×
+faster than the I/O subsystem can feed it on this host.
+
 ## 7. Migration strategy: Ship of Theseus
 
 Throughout the rewrite, the production stack stays alive. Each
@@ -854,6 +1003,12 @@ until v1.0:
 | 2026-05-14 | wbadmin replacement strategy: build our own `backup-image` worker in Rust | All pieces exist (`windows::Win32::Storage::Vhd` for VHDX, `windows::Win32::Storage::Vss` for snapshots, `ntfs` crate for sparse reads, shell out to `bcdboot.exe` for BCD); buildable in weeks not months | Tentative |
 | 2026-05-14 | macOS bootable-image is explicitly out of scope (Apple's design forbids it) | Document as platform limit in OSS readme | Settled |
 | 2026-05-14 | Linux `backup-image` worker will compose `partclone` + bootloader rather than be one binary | No "give-me-a-bootable-image" syscall exists on Linux; Clonezilla is a curated assembly, not a library | Tentative |
+| 2026-05-15 | AV exclusions at install time must cover BOTH live-volume and VSS-shadow path namespaces (`\Device\HarddiskVolumeShadowCopy*\<rel>\*` in bare-NT form for BD-style consumer AVs) | Empirically verified `kopia-bhw`: live-volume exclusions do not propagate to shadow-access paths; DOS-namespaced (`\\?\GLOBALROOT\...`) is silently ignored | Settled (BD-confirmed; pattern likely generalizes to other AVs but unverified) |
+| 2026-05-15 | Wrapper / Backup Server must align destination dated folder to source BEFORE invoking workers that key by basename | `kopia-8fc`: wbadmin's nightly folder rotation otherwise triggers full re-mirror every night | Settled |
+| 2026-05-15 | Backup Server install must set explicit `<Priority>5</Priority>` (Normal) on every scheduled task it manages | `kopia-8ag`: Task Scheduler default is BelowNormal, propagates to all children, silently throttles I/O 2-3× | Settled |
+| 2026-05-15 | Adopt `FSCTL_USN_TRACK_MODIFIED_RANGES` + `USN_RECORD_V4` as the primary change-detection primitive for the file-tier worker; `FSCTL_QUERY_ALLOCATED_RANGES` for sparse-file preflight; reject Hyper-V RCT | Plain NTFS, no Hyper-V dependency, byte-range granularity, documented stable APIs; turns 80-minute VHDX hash passes into minutes-proportional-to-delta. See §6.7. Closes RCT as a dead end. | Settled |
+| 2026-05-15 | Worker contract is structured JSON-over-HTTP (or named-pipe), never magic-string log parsing | `kopia-wp4`: producer/consumer separator-format drift silently broke the dashboard's replica-OK signal for 4 nights post-cutover. The new contract eliminates this class. | Settled (already implied by §5.3; explicit now) |
+| 2026-05-15 | Intra-file pipeline parallelism (rehash producer thread + main-loop consumer + bounded crossbeam channel) is the canonical pattern for any worker phase that reads two disjoint physical disks; multi-threaded hashing and cbt-mode file-level parallelism are explicitly rejected | `kopia-c90` landed this pattern in backup-mirror; the `backup-image` worker should inherit it. Multi-threaded hashing is CPU-side overkill (SHA-256 already 2.5× faster than I/O); cbt-mode file parallelism causes head thrash on spindle destinations | Settled |
 
 ## 10. References
 
@@ -861,11 +1016,24 @@ until v1.0:
 - `SECRETS.md` — secrets layout + recreate procedure.
 - Memory: `feedback-index-must-stay-on-d`,
   `feedback-backup-tooling-rust-default`, `feedback-ps51-utf8-bom`,
-  `reference-bd-boxter-kopia`, `reference-backup-architecture`.
+  `reference-bd-boxter-kopia`, `reference-backup-architecture`,
+  `reference-bd-shadow-copy-exclusion` (added 2026-05-15),
+  `reference-taskscheduler-priority-default` (added 2026-05-15).
 - Beads: `kopia-a4i` (this vision), `kopia-0dr` (Backup Server epic),
   `kopia-bmy` (replica cutover), `kopia-02h` (scrub brace-eating),
   `kopia-bmy.6` (BD Boxter heuristic), `kopia-bmy.7` (verify
   finally-block crash), `kopia-1yn` + `kopia-2xy` (DR hardening).
+- 2026-05-15 session beads:
+  - Closed: `kopia-8j4` (preflight dst-size), `kopia-sto` (walk
+    don't bail), `kopia-8fc` (wbadmin dst-folder alignment),
+    `kopia-bhw` (BD shadow-copy exclusion), `kopia-c90` (pipeline
+    torn-recovery), `kopia-wp4` (parser separator),
+    `kopia-44w` (RCT, superseded by USN V4).
+  - Open: `kopia-8ag` (apply Priority=5 to all `\Backup\` tasks),
+    `kopia-61n` (USN V4 range tracking), `kopia-dyj`
+    (`FSCTL_QUERY_ALLOCATED_RANGES`), `kopia-0cj` (file-level
+    parallelism for blob mode), `kopia-10r` (alignment-log gap),
+    `kopia-xl2` (rehash producer silent emit).
 - External:
   - kopia: <https://github.com/kopia/kopia>, <https://kopia.io>
   - rustic: <https://github.com/rustic-rs/rustic>
