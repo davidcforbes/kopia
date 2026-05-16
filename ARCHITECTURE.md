@@ -285,6 +285,54 @@ Sources for both subsections live in the closed/in-progress bead histories
 (`bd show kopia-44w`, `bd show kopia-61n`, etc.) — the research reports
 themselves are linked from those bead notes.
 
+### USN V4 byte-range tracking (kopia-61n)
+
+Implemented 2026-05-16 for the `WindowsImageBackup` subtree only. NTFS
+USN V4 records (`FSCTL_USN_TRACK_MODIFIED_RANGES` + `USN_RECORD_V4`
+extents) tell us exactly which byte ranges of each file were modified
+since the prior cursor. When the trust-marker gate (kopia-8j4) passes
+AND the journal proves a chunk's byte range untouched since the
+manifest's recorded `last_usn`, `backup-mirror` skips the disk read and
+reuses `manifest.hashes[idx]` — counted under `chunks_skipped_usn`.
+
+- State at `C:\BackupMirror\state\WindowsImageBackup\usn-journal.json`.
+  Per-volume `(journal_id, last_usn, range_chunk_size,
+  file_size_threshold)` plus a `per_file` map keyed by 128-bit FRN.
+- Per-file `last_usn` lives in the manifest header's `reserved[0..16]`
+  (no format-version bump — reserved bytes exist for this kind of
+  forward-compat extension).
+- Journal sized at 512 MiB max / 128 MiB allocation delta on D:\,
+  large enough for ~24h of busy NTFS activity. Track-modified-ranges
+  ChunkSize = 4 MiB to match the CBT chunk grain;
+  FileSizeThreshold = 64 MiB to avoid emitting V4 records for tiny
+  files we wouldn't benefit from skipping.
+- Self-enables on first run (idempotent `FSCTL_CREATE_USN_JOURNAL` +
+  `FSCTL_USN_TRACK_MODIFIED_RANGES`). Requires
+  `SeManageVolumePrivilege`, which the scheduled task carries via
+  `RunLevel=HighestAvailable`.
+- Trust-gate invariant: USN signal NEVER bypasses size or marker
+  checks. If `dst.len() != manifest.src_size` or `.cbt.ok` is missing,
+  torn-recovery runs full-rehash regardless of what the journal claims.
+  Verified by `usn_signal_never_bypasses_trust_gate` test.
+
+Observable events on stderr:
+- `usn_state_change` with outcome=`ok|journal_reset|journal_wrapped|just_enabled|not_applicable`
+  (one per mirror invocation when the feature is on)
+- `backup-mirror summary mode=cbt ... chunks_skipped_usn=N usn_state=...`
+  on stdout
+
+Failure modes (graceful, non-destructive):
+- Journal reset (id changed) → `per_file` wiped, this run is a full
+  rehash; next run gets the benefit.
+- Journal wrapped (cursor < LowestValidUsn) → same.
+- Pathologically small `RangeTrackChunkSize` (<1 MiB) → feature
+  self-disables for this run (`not_applicable`); avoids state-file
+  blow-up.
+
+Code: `C:\dev\backup-monitor\src\mirror\usn.rs` (module + Win32 FFI),
+preflight + per-chunk predicate in `src/mirror/cbt.rs`,
+`--usn-journal-state` + `--usn-volume` flags in `src/bin/mirror.rs`.
+
 ## When to update this doc
 
 - Any new binary or task added to the chain.
