@@ -32,9 +32,24 @@ eventually **open-sourced on GitHub** as a community-supportable
 alternative to both kopia (file-only, Go) and Macrium (proprietary,
 Windows-only).
 
+**Competitive target:** the open-source release aims for **feature
+and speed parity with Macrium Reflect** at the imaging tier and
+with kopia/restic at the file tier — beating both on *integration*,
+since today neither tool covers the full ground a Windows user
+needs (file-level dedup AND bootable system images AND headless
+orchestration AND a polished UI). See §8 for the Macrium feature
+matrix and what's in/out of v1.0 scope.
+
 Working name TBD (not "kopia2" — needs its own identity). Likely
 Apache-2.0 to match kopia's license and preserve compatibility for
 later format-bridging work.
+
+**Release model:** the current personal stack continues to receive
+maintenance fixes until it reaches a frozen stability point (see
+§7.x); after that, only critical regressions are patched, and all
+new development happens on the OSS branch line. The frozen personal
+build is the operator's safety net while the v1.0 OSS build proves
+itself in parallel evaluation against today's real workloads.
 
 ## 2. Why this, why now
 
@@ -963,7 +978,103 @@ goes through the production stack continuously; the new code path
 is tested against synthetic fixtures + parallel-evaluation
 shadows.
 
+### 7.1 Freeze point: personal-use stable, OSS-dev branch
+
+Once the **current codebase** (kopia + wbadmin + backup-monitor +
+backup-mirror + scripts/, all the work tracked in `kopia-bmy` and
+its children) reaches a stability point where the dashboard is
+green for ~14 consecutive nights with no manual intervention, we
+**freeze it as the operator's personal-use build**. Concretely:
+
+- Tag the personal-stack repo at `personal-v1-frozen` (or similar)
+  on both `kopia` and `backup-monitor`.
+- The frozen tag receives only critical-regression patches —
+  security CVEs, AV vendor breakage, Windows-API breakage on a
+  future Windows feature update. No new features.
+- All new development moves to a separate branch line (`oss-dev`
+  or a new repo) targeting the §1 vision.
+
+The two lines run in parallel for the duration of the OSS rewrite:
+
+```
+personal-v1-frozen ──● (security-only, runs daily, owns user's data)
+                     │
+                     │ parallel evaluation
+                     │ (synthetic + replica shadow)
+                     │
+oss-dev    ──────────● (active development, no user-data dependency)
+                     │
+                     ●─→ feature/speed parity with Macrium
+                     │
+                     ●─→ v1.0 cut, OSS public release
+                     │
+                     ●─→ N nights of parallel-eval success
+                     │
+                     ●─→ personal-stack migration to OSS v1.0
+                          (operator's call, not forced)
+```
+
+This is the literal Ship of Theseus pattern from §7 applied at the
+codebase level rather than the worker level: keep the working
+thing working while the new thing matures, then transition only
+when the new thing has earned the trust. The frozen tag exists
+specifically so operator confidence in their backups is never
+contingent on the OSS dev branch's stability.
+
+What "stable enough to freeze" means concretely:
+
+- 14 consecutive nights green per `backup-dump.exe` (Kopia,
+  wbadmin, Replica, Heartbeat all OK)
+- No open P1 beads against the personal stack
+- BD exclusions documented and reproducible on a fresh machine
+  (kopia-bhw resolution)
+- All five `\Backup\` tasks set to explicit Priority=5 (kopia-8ag)
+- `signing\README.md` covers the cold-start procedure for a fresh
+  host (incident-recovery target)
+
+Today's session moved several items into the "done" column toward
+this freeze. Open items above are the bar for declaring the
+freeze.
+
 ## 8. Out of scope (deferred decisions)
+
+### 8.1 Macrium Reflect feature parity matrix — what we WILL match for v1.0
+
+The §1 competitive target says "feature and speed parity with
+Macrium Reflect at the imaging tier." Concretely, for v1.0 OSS
+release:
+
+| Macrium feature | Our v1.0 plan | Architecture mapping |
+|---|---|---|
+| Full disk + partition imaging (bootable VHDX/VHD) | **YES** | `backup-image` worker, §6.2 |
+| Incremental imaging via Changed Block Tracking | **YES, and via documented OS API rather than a kernel driver** | USN V4 + ALLOCATED_RANGES, §6.7. We deliberately reject Macrium's minifilter-driver approach — we get equivalent CBT semantics from documented NTFS primitives. |
+| Rapid Delta Restore (block-level fast restore) | **YES** | `backup-image` restore mode reverses the chunk-CBT manifest — only writes blocks that differ from current dst state. Same primitive as backup-mirror's existing torn-recovery path scales to restore direction. |
+| Mount image as virtual drive (browse without restore) | **YES** | `backup-image` + `windows::Win32::Storage::Vhd::AttachVirtualDisk`. For file-tier snapshots, separate `backup-file mount` worker via WinFsp (§6.4). |
+| Verify image integrity | **YES** | rustic_core `check` for file tier; per-chunk SHA-256 + sidecar manifest hash for image tier. |
+| AES-256 encryption at rest | **YES** | Inherited from rustic_core (file tier); separate symmetric encryption layer for VHDX image tier. |
+| Compression (configurable) | **YES** | rustic_core zstd (file tier); zstd on chunk writes in image tier. |
+| Scheduled backups | **YES** | Backup Server's job DAG (§5.2), replacing Macrium's scheduler and Windows Task Scheduler both. |
+| VSS integration | **YES** | Built into every read-path worker; not optional. §5.2/§6.0 — VSS lives in the orchestrator. |
+| WinPE / Linux rescue boot media | **YES, post-MVP — necessary for OSS credibility** | Native Boot VHDX restore covers the common case (§6.2). A WinPE-based recovery ISO is required for "C: drive is dead" scenarios and must ship by v1.0. Build target: small WinPE image with backup-server + backup-image embedded, fetches manifest from D:\ replica. |
+| ViBoot (instantly boot image as VM for test/recovery) | **STRETCH** | VHDX is a native Hyper-V format. With Hyper-V or a free hypervisor (VirtualBox supports VHDX read since 6.0), this is mostly orchestration. Add a `backup-image vmboot` command that creates the VM definition and starts it. Not a v1.0 blocker, but the gap with Macrium narrows the demo. |
+| Image Guardian (ransomware protection for backup files) | **YES, simpler form** | Backup destination repo path is owned by a dedicated low-privilege service account; user account has read-only access. Ransomware running as the user can't damage the backup. Optional: filesystem-filter-based write protection if Windows ever exposes a sane API. |
+| Cloning (live disk-to-disk) | **STRETCH** | `backup-image --restore-target=physical-disk` covers it via the existing imaging primitives. Not a v1.0 priority but practically free given the rest of the stack. |
+| Differential imaging (vs. incremental) | **NO** | Modern CBT incrementals make differentials a less useful feature. Document why we skip it. |
+| Site Manager (central multi-machine management) | **NO (out of v1.0)** | Single-machine first. Multi-machine roadmap deliberate. |
+| PXE Boot Rescue | **NO** | Out of scope; small-scale operator use case. |
+
+**Speed parity targets** (measured on this host's actual workload
+as the operator's benchmark):
+
+| Workload | Macrium-class target | Our path to it |
+|---|---|---|
+| First full image of 2.7 TB system | ≤ source disk's sequential read throughput × duration | NTFS sparse-allocated-range awareness (§6.7) brings us to "as fast as the OS will sustain reads of the allocated blocks" |
+| Incremental image, 99% unchanged | minutes, proportional to delta | USN V4 + ALLOCATED_RANGES, §6.7 — same primitive Macrium uses (CBT), via documented API instead of a driver |
+| Restore 2.7 TB image, 5% blocks need write | minutes, proportional to delta | Reverse-direction chunk-CBT (kopia-c90 pattern), only writes blocks that differ from current target state |
+| Nightly file-tier backup of unchanged C:\ | seconds | USN journal V2/V3 (file-level) skips clean-file hash pass entirely |
+| Browse snapshot to extract one file | seconds to mount, instant browse | WinFsp + rustic_core's snapshot tree walk — already fast in rustic upstream |
+
+### 8.2 Out of scope, period (until well after v1.0)
 
 These are explicitly NOT in the unified-system roadmap, at least
 until v1.0:
@@ -971,12 +1082,17 @@ until v1.0:
 - **Cloud backends** (S3, Azure, GCS, B2). Local + LAN replica
   only for v1. Cloud is what kopia already does well; reach for it
   later or stay in the "local-first, optional cloud later" lane.
-- **Multi-machine fleet management**. Single-machine first. The
-  Backup Server is per-machine, not central.
+- **Multi-machine fleet management** / Site Manager. Single-machine
+  first. The Backup Server is per-machine, not central.
 - **Remote management / web dashboard**. Local UI + CLI only.
-- **Linux/macOS in v1.0**. Windows-first, deliberate.
+- **Linux/macOS in v1.0**. Windows-first, deliberate (Linux
+  imaging composes `partclone` + bootloader per §6.6; macOS
+  bootable image is impossible per Apple's design).
 - **Kopia format byte-compatibility writing** (vs. reading). Read
-  for migration; write only in native format.
+  for migration; write only in native (restic) format.
+- **Differential imaging** as a separate operation from
+  incrementals. Modern CBT obviates it.
+- **PXE Boot Rescue**. Niche, deferred indefinitely.
 
 ## 9. Decision log
 
@@ -1009,6 +1125,8 @@ until v1.0:
 | 2026-05-15 | Adopt `FSCTL_USN_TRACK_MODIFIED_RANGES` + `USN_RECORD_V4` as the primary change-detection primitive for the file-tier worker; `FSCTL_QUERY_ALLOCATED_RANGES` for sparse-file preflight; reject Hyper-V RCT | Plain NTFS, no Hyper-V dependency, byte-range granularity, documented stable APIs; turns 80-minute VHDX hash passes into minutes-proportional-to-delta. See §6.7. Closes RCT as a dead end. | Settled |
 | 2026-05-15 | Worker contract is structured JSON-over-HTTP (or named-pipe), never magic-string log parsing | `kopia-wp4`: producer/consumer separator-format drift silently broke the dashboard's replica-OK signal for 4 nights post-cutover. The new contract eliminates this class. | Settled (already implied by §5.3; explicit now) |
 | 2026-05-15 | Intra-file pipeline parallelism (rehash producer thread + main-loop consumer + bounded crossbeam channel) is the canonical pattern for any worker phase that reads two disjoint physical disks; multi-threaded hashing and cbt-mode file-level parallelism are explicitly rejected | `kopia-c90` landed this pattern in backup-mirror; the `backup-image` worker should inherit it. Multi-threaded hashing is CPU-side overkill (SHA-256 already 2.5× faster than I/O); cbt-mode file parallelism causes head thrash on spindle destinations | Settled |
+| 2026-05-15 | Personal-stack codebase will be frozen at `personal-v1-frozen` once it sustains 14 consecutive green nights, no open P1s, BD/priority/signing-setup all documented for fresh-host rebuild; OSS-dev branch line starts thereafter, runs parallel-eval against synthetic + replica shadow, never touches operator's data | Separates operator-data-safety from OSS-dev-stability so neither blocks the other; canonical Ship-of-Theseus pattern applied at codebase scope rather than worker scope (§7.1) | Active vision |
+| 2026-05-15 | OSS-dev v1.0 competitive target: feature and speed parity with Macrium Reflect at the imaging tier and with kopia/restic at the file tier; explicit Macrium feature matrix and speed targets recorded in §8.1 | Concretizes the §1 vision into a measurable bar; clarifies what we WILL build (imaging, CBT, mount, rescue media, encryption, ransomware-resistant repo) vs WON'T (Site Manager, PXE, differential, cloud-in-v1) | Active vision |
 
 ## 10. References
 
