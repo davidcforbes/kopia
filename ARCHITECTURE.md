@@ -192,6 +192,33 @@ The companion `check_branch_drift.ps1` was retired in the same
 change. Recreate steps for a fresh machine live in
 [`SECRETS.md`](SECRETS.md).
 
+## Bitdefender exclusions (kopia-bmy.6)
+
+Bitdefender Total Security (consumer) fires the behavioral heuristic
+`CMD:Heur.BZC.PZQ.Boxter` on `kopia.exe snapshot create C:\dev
+--parallel=16`. The action is process-block-no-quarantine: kopia.exe is
+killed silently, no `.bdq` artifact, only a JSON record under
+`C:\ProgramData\Bitdefender\Bitdefender Security App\ctc\rca\*.dat`.
+The 2026-05-13 23:11 production cascade was caused by exactly this
+(see `reference_bd_boxter_kopia.md` in this directory's auto-memory).
+
+Fresh-host setup must add these BD exclusions before scheduling the
+backup tasks:
+
+| Type | Path | Reason |
+|------|------|--------|
+| Process | `C:\Users\david\go\bin\kopia.exe` | snapshot create heuristic |
+| Process | `C:\dev\backup-monitor\target\release\backup-monitor.exe` | reads cli-logs at high cadence |
+| Process | `C:\dev\backup-monitor\target\release\backup-mirror.exe` | reads VSS shadows + writes E: at high cadence |
+| Process | `C:\dev\backup-monitor\target\release\backup-dump.exe` | parses logs at user-driven cadence |
+| Folder  | `C:\dev\kopia\scripts\` | signed-helper directory, defensive |
+| Folder (special) | NT-form `\Device\HarddiskVolumeShadowCopy*\...` for shadow paths | per `reference_bd_shadow_copy_exclusion.md` — DOS-namespace `\\?\GLOBALROOT\…` does NOT work for BD consumer despite the public docs |
+
+Set via the BD Total Security UI → Protection → Antivirus → Settings →
+Manage exceptions. The Boxter heuristic specifically requires the
+process exclusion, not just folder exclusion (folder alone leaves the
+behavioral monitor armed against kopia.exe).
+
 ## Cross-project dependencies
 
 `backup-monitor` depends on a sibling crate `d2d-ui` at
