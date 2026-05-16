@@ -82,6 +82,36 @@ if (-not $VerifyOnly) {
     Write-Host "metadata : $metadata"
     Write-Host ''
 
+    # Pre-flight lock check (kopia-tpl). signtool can't re-sign a file that is
+    # already memory-mapped as an executable image -- Windows returns
+    # ERROR_SHARING_VIOLATION and signtool reports "The file is being used by
+    # another process". The previous behavior was to abort the whole loop on
+    # the first locked file, leaving later targets unsigned. Instead: identify
+    # locked targets up front, name the holding processes, and skip them with
+    # a clear message so the rest of the batch can complete.
+    $lockedTargets = @()
+    foreach ($t in $targets) {
+        if (-not (Test-Path $t)) { continue }
+        try {
+            $fs = [System.IO.File]::Open($t, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+            $fs.Close()
+        } catch [System.IO.IOException] {
+            $abs = (Resolve-Path -LiteralPath $t).Path
+            $holders = Get-Process | Where-Object { $_.Path -eq $abs } | Select-Object -ExpandProperty Id
+            $lockedTargets += [pscustomobject]@{ Path = $t; Holders = $holders }
+        }
+    }
+    if ($lockedTargets.Count -gt 0) {
+        Write-Host '=== Locked targets (skipping) ===' -ForegroundColor Yellow
+        foreach ($lt in $lockedTargets) {
+            $hint = if ($lt.Path -like '*kopia.exe') { '  hint: stop the kopia server (Stop-Process -Id <pid>) and rerun sign-all' } else { '' }
+            Write-Host ("  {0}  held by PID(s): {1}{2}" -f $lt.Path, ($lt.Holders -join ', '), "`n$hint") -ForegroundColor Yellow
+        }
+        Write-Host ''
+        $lockedPaths = $lockedTargets.Path
+        $targets = $targets | Where-Object { $_ -notin $lockedPaths }
+    }
+
     foreach ($t in $targets) {
         if (-not (Test-Path $t)) { Write-Warning "Skipping (not found): $t"; continue }
         # Pre-sign parse-check for .ps1 targets (kopia-02h). Past incidents
@@ -125,8 +155,8 @@ Write-Host 'All signatures valid.' -ForegroundColor Green
 # SIG # Begin signature block
 # MII9bgYJKoZIhvcNAQcCoII9XzCCPVsCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCD2GrAy6zuTJbcY
-# bYvqCkECmLZm8PpJnyl/MUf74xVHmKCCIjAwggXMMIIDtKADAgECAhBUmNLR1FsZ
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCD2uhPw4yv3aLlO
+# kP+jpiWsLlHrClvyRs2m8BrQLY7RvaCCIjAwggXMMIIDtKADAgECAhBUmNLR1FsZ
 # lUgTecgRwIeZMA0GCSqGSIb3DQEBDAUAMHcxCzAJBgNVBAYTAlVTMR4wHAYDVQQK
 # ExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xSDBGBgNVBAMTP01pY3Jvc29mdCBJZGVu
 # dGl0eSBWZXJpZmljYXRpb24gUm9vdCBDZXJ0aWZpY2F0ZSBBdXRob3JpdHkgMjAy
@@ -313,20 +343,20 @@ Write-Host 'All signatures valid.' -ForegroundColor Green
 # cmF0aW9uMSswKQYDVQQDEyJNaWNyb3NvZnQgSUQgVmVyaWZpZWQgQ1MgRU9DIENB
 # IDAzAhMzAAEQB7JfAW3AtcBgAAAAARAHMA0GCWCGSAFlAwQCAQUAoF4wEAYKKwYB
 # BAGCNwIBDDECMAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwLwYJKoZIhvcN
-# AQkEMSIEIOLM8B1Rpfcpc5f+vxNjP36Damqz05CQ42DnAdk0VhqhMA0GCSqGSIb3
-# DQEBAQUABIIBgC5SA+q8T+VzVNQAB+GeCPScldVIp64sOvKKH2hVsCsYccH5KL/d
-# GlowmZODy9qLGKMMSzTW4iQTzgSLWomWb8uh451q0mYMZXr/ICEUF9UTjCM0x1MY
-# zitLtDEaBn1rz+0V/NqVUJxwdtxzDadY2osbY8Chunj/ktqXGe1mmzi6gqfJpoFo
-# EpYm9VW88q5zirUdzBj9kw+E+FgNzJroBSl77awPogOzmarCn8XSak3cWTGlIBvV
-# UqqOUda7t/pDR4aYLg/YADyv4pNKjv21QUe7We/qnVApK2Tereel3+YqUJ8lSR6G
-# CvadPhyEt7k6HAnTv2RlMKrK3HfuPv+7Tb3cf/yI5UKcFsKskftwDZv1Uv+vu0yn
-# 51WnEshec6oqszR1mY1mMK0jtjHxo1SWaSCPYf2LfxWj+LKUT6u+GLJMrcfAEzEm
-# WfPvJjEuafYq2JogKu+Wv7WMWrXxugBXOdI1gqxdMSwc+D6/tl+NzwuDf85Ci4Q2
-# uPA50gJhajFejKGCGBQwghgQBgorBgEEAYI3AwMBMYIYADCCF/wGCSqGSIb3DQEH
+# AQkEMSIEILYWBruZie6zWvnhTj+kejnc8BLR9rjJG7I9iFin3YSIMA0GCSqGSIb3
+# DQEBAQUABIIBgAX6sENUdXFUMQrqUxva+XaRsXJBOYQA6Min2ugJnwFbbUdufWlE
+# JlvN8UHRJ+yt4PuKhSIPi+OAw5z5PyybkErh1YtH/loE3wiLYoQoaq0CR44o/0ML
+# 9lTbi3GPmjULQoPe7KLp8NoUXvHplVjzdN5sQREpDo8EWPE5OuyZPVtd3eb3JegB
+# lWzLCKqwq6WK/0WD+8/XKnA/UfUFC3XLYodyOXpAhhV0uZMn/aCbKXd6KzEgQkT7
+# 0N0XxBuQpdbE7Te/2sUlyqTWZDPzSG8AmiJH9Ba/8lsnWVXHQ+qiS7LWpzFXS4zj
+# f0g6cL61FDz0e7UJt2aLDCaJR0oR+SCUCA86LjkRmnk246hwdaSZglI1v96VzZGY
+# j7m2IGqU+X7f/wHAp55fI2KHSJgza/afXWLzV3jjxeCN4YETnAMOu0MGUdaNSyJB
+# 68LVMWAzSBrDM5OghMuTfgUdSfp0XwhsYX47uqJOTla11muS5KkY3eDC0lFPQROs
+# Cuf6U3el7sdb9qGCGBQwghgQBgorBgEEAYI3AwMBMYIYADCCF/wGCSqGSIb3DQEH
 # AqCCF+0wghfpAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFiBgsqhkiG9w0BCRABBKCC
-# AVEEggFNMIIBSQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCC5a7nv
-# sluQYS70Vrgig+rEFdq8HaAmsLWhLhtcNH2zjQIGaeiBKKSlGBMyMDI2MDUxNjE0
-# NTcyNi4yMDFaMASAAgH0oIHhpIHeMIHbMQswCQYDVQQGEwJVUzETMBEGA1UECBMK
+# AVEEggFNMIIBSQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCBRJolB
+# lqp+hevP4f07Keez6HIICWTvdElKLdZVNWkDYgIGaeiBKKUjGBMyMDI2MDUxNjE0
+# NTkyNC4yNzRaMASAAgH0oIHhpIHeMIHbMQswCQYDVQQGEwJVUzETMBEGA1UECBMK
 # V2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0
 # IENvcnBvcmF0aW9uMSUwIwYDVQQLExxNaWNyb3NvZnQgQW1lcmljYSBPcGVyYXRp
 # b25zMScwJQYDVQQLEx5uU2hpZWxkIFRTUyBFU046N0QwMC0wNUUwLUQ5NDcxNTAz
@@ -416,8 +446,8 @@ Write-Host 'All signatures valid.' -ForegroundColor Green
 # dGlvbjEyMDAGA1UEAxMpTWljcm9zb2Z0IFB1YmxpYyBSU0EgVGltZXN0YW1waW5n
 # IENBIDIwMjACEzMAAABV2d1pJij5+OIAAAAAAFUwDQYJYIZIAWUDBAIBBQCgggSf
 # MBEGCyqGSIb3DQEJEAIPMQIFADAaBgkqhkiG9w0BCQMxDQYLKoZIhvcNAQkQAQQw
-# HAYJKoZIhvcNAQkFMQ8XDTI2MDUxNjE0NTcyNlowLwYJKoZIhvcNAQkEMSIEIALA
-# u8h0dlQ+CwkundC9NLJjYYavKmjy71uv+66dWCALMIG5BgsqhkiG9w0BCRACLzGB
+# HAYJKoZIhvcNAQkFMQ8XDTI2MDUxNjE0NTkyNFowLwYJKoZIhvcNAQkEMSIEIEsf
+# ggLBAdp7u8vzobneBgSXW7bPzEzN8tyfuaLbL740MIG5BgsqhkiG9w0BCRACLzGB
 # qTCBpjCBozCBoAQg2Lk8l2SGYru/ff7+D2qrJnkswcYdK6pGKu7GGGr4/s0wfDBl
 # pGMwYTELMAkGA1UEBhMCVVMxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlv
 # bjEyMDAGA1UEAxMpTWljcm9zb2Z0IFB1YmxpYyBSU0EgVGltZXN0YW1waW5nIENB
@@ -440,15 +470,15 @@ Write-Host 'All signatures valid.' -ForegroundColor Green
 # XQzBm4IBkbyLmiN6a3v9/UMrpKQ5elXnf2yy26SeB0DNqxOki3/3POA2Wr6ukgn3
 # IsrXszMONR1oTw2gEzl9iSrg6BG9H4wLoAsitBN1rDyd/TTU/9kSEGmOtPgbIkVC
 # NemohHJN3lKvQfZXutcbYB93VgyB0lyVRSKm/Dem6zANBgkqhkiG9w0BAQEFAASC
-# AgAcGcMZvCiLiFaBykY1UponvR6Ik/ozySDBT4EX/LS4ky+tmvjHvTdFU3PjpeQn
-# wN8rb/qJR6ev+jVxl0wCAtui1Yvt/us9V5keZ3Ip5THhBWU1PAQFt/J/eCCn2WOr
-# FPoZuR6Xo64ZHeQA0psZ4sL66Ixc1IHtw/uZ/VeB9jbTNErW+3sqJOfb8plevVUX
-# KGmwa8HamByw0ltyVREkuWc7c3r67138tKU+Gt9ZPJgS3qgaw99PyFYgb/bIVUfD
-# kbDH1NZohaZ4dW0T8pDro4ray7nvCfrENhAIfRiYQbO+hZ9fY+Ms/CnoCKF4glwM
-# ybSbEZqvIBkUrEi994bxLK8DIxYIY+STg5uVzI+iURB+B2LW600r3OTKZcxTk3xV
-# aZkNMU3hUfKCebmctRvPuhdfa9i5I09Ou1/vE8v7XtT2MatDJcd/nAgg4st/JO6G
-# HCnjrXl64H6zWYBI+LlWRESNYh0sfWJrAqZoHaUUMLP2Aggijac2Eb9nEUL/yBGC
-# WJmjDUvgNodqi3ayQcqcrKe/PaMVkiTazO6muRWOihrQs/OvQPyLyAimyhr0/kED
-# oP8aJzFVdWgN4FJiCq39jW5ccTGYFLhetgyEq18oZjEngu48UzS80eA45ZDVSpFD
-# sKsmCMfPdgPm94MzakyZF1Jj7jvZo1TKDGiSvnTXsWvD6Q==
+# AgAa+9Cey6fhZ9nLzmE4OUY4wgBZ5AVhWjIey5pX/40ctSOkuxCFvrpnRpsI8C5j
+# NchMxv1LDoHagcFLD+frEO3R46uLldvr8JkCyj9Dn2xNYBZDEFiOp816CogvA+6g
+# qHTbRRPfLOPnezXKoYymsJKDJ4hzN0XxrLVXzwAkoWhXmQtexd840g3gae5osScb
+# yoyyQuHRALoEpilgebWhsUFhFRF72QhdRxZdyQEsSgc5P08jU2azY17uJEs+iJE/
+# 3ufuJvVL3TcE6NGTD2XVx9lJqs1ukZWP2cgibHprx6zkWkgjy+n4Dd2KKPbwBeoF
+# 8/wf4G7SIDg9hyRYguUh6wIPfbgpp3YyEhYs9t9VE+djv2WRMDI7J8Ar29jaLsVZ
+# kmB9D2xURmXdXP6EPFGQ1UmA0AoyAIW6Og7cEX4JFvLF++paiPd6qYxULk9EMcqJ
+# GNc62qTbkNoIiNrCHWnX7ISRlfQjItbL0tU8TAiyqvDT/ARlyVLdZIl7YJs45Z0P
+# cxa3gnlsdOGIt80bB1dOWhqKipWuKWnsv+W1uctpOxVkpt4WXpkgyKWpAskMfnif
+# 80cXDeDEDy3gSY2yJ5Zbc3TIWbyCPf+jzynObyT0CKSqo01oULgiqpNTKaBv7riW
+# Sonarpq4wLzDmfF0PWhzBXpNyHQDVBOWA/KjxkPrawnnvA==
 # SIG # End signature block
