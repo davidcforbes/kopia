@@ -46,6 +46,8 @@
 
     </IdleSettings>
 
+    <Priority>5</Priority>
+
   </Settings>
 
   <Triggers>

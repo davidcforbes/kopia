@@ -52,6 +52,8 @@
 
     <UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>
 
+    <Priority>5</Priority>
+
   </Settings>
 
   <Triggers>

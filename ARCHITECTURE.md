@@ -103,6 +103,19 @@ templateId-based, fires at 02:00 to `D:` with `-allCritical`). A second
 daily run, conflicted on the same target, and its companion script was missing
 since the 04-25 incident — it was deleted 2026-05-02 (kopia-5o6 closed).
 
+**Task priority (kopia-8ag).** The five heavy-I/O tasks above
+(`DailyDReplica`, `DailyKopiaSnapshotV2`, `WeeklyReplicaVerify`,
+`WeeklyBackupVerify`, `KopiaServer`) carry explicit `<Priority>5</Priority>`
+(Normal) in their committed XML under `scripts/scheduled-tasks/`. Without
+this element Task Scheduler defaults to 7 (BelowNormal), which propagates to
+every child process and causes ~2-3× slowdowns on backup I/O. The three
+lightweight health-check tasks (`KopiaBackupHealthCheck`,
+`WbadminHealthCheck`, `KopiaCicdHealthCheck`) intentionally stay at the
+default — they're query-only and shouldn't compete with daytime processes.
+Fresh-host setup is `Register-ScheduledTask -Xml ...` against each XML; the
+priority comes along automatically. To verify on a live host:
+`Get-ScheduledTask -TaskPath '\Backup\' | Select-Object TaskName, @{N='Priority';E={$_.Settings.Priority}}`.
+
 ## Notification chain
 
 1. `daily_kopia_backup.cmd` writes the structured `snapshot summary
