@@ -104,6 +104,71 @@ inventory. The summary:
 - **Wrapper scripts** (PowerShell 5.1 + cmd) orchestrate the above
   via Task Scheduler entries under `\Backup\`.
 
+### 3.1 What's been built — milestone log
+
+A living record of what has actually shipped under the `kopia-0dr`
+epic (Backup Server control plane), milestone by milestone. Update
+this on each phase gate met so the vision doc reflects reality, not
+just intent. Commit hashes are in the `backup-monitor` repo
+(`oss-dev` branch) unless noted.
+
+**Phase 1.0 — server skeleton** (`49059f1`). `backup-server.exe`
+with config (`jobs.toml`), persistent state (SQLite `state.db` +
+append-only `events.jsonl`), and a loopback REST API skeleton.
+
+**Phase 1.1 — DAG runner** (`9cd16f6`). Topological job ordering,
+subprocess worker supervision, stdout `summary` parsing, retry policy.
+
+**Phase 1.2 — orchestration core**:
+
+- Slice 1 — heartbeat thread + working `POST /api/jobs/{name}/run`
+  (`2987ab7`).
+- Slice 2 — cron-aware DAG gating + `--force-all` override
+  (`e10ecd5`).
+- Slice 3 — `CancelRegistry` + `POST /api/jobs/{name}/cancel` +
+  thread-per-request HTTP (`8845e30`); DAG-level cancel propagation
+  fix (`09d505c`, kopia-0dr.2).
+- Hardening — non-loopback `http_listen` rejected at startup
+  (`e9eb5e5`, kopia-0dr.5); stall-watch (event-age + child-CPU)
+  inside worker supervision (`c4debe0`, kopia-0dr.3); SQLite WAL +
+  orphan-run crash sweep (`bdddf24`, kopia-0dr.6); Ctrl+C / SIGTERM
+  graceful shutdown (`9783db5`, kopia-0dr.8); `events.jsonl` daily
+  rotation + gzip + prune (`a68b5ee`, kopia-0dr.7); worker-contract
+  enforcement (`3d6d5ed`, kopia-0dr.9).
+- Trial — first production worker (`weekly_replica_verify`, 474 s,
+  passed) end-to-end through REST (2026-05-16).
+
+**Phase 1.3 — cutover** (executed 2026-05-17, kopia-0dr.4).
+`backup-server --run-once --job <name>` single-job mode (`11e7b1b`).
+Four `\Backup\BackupServerWaker-*` scheduled tasks registered
+(`Priority=5`, `InteractiveToken`, `HighestAvailable`); the four
+legacy prod tasks (`DailyKopiaSnapshotV2`, `DailyDReplica`,
+`WeeklyReplicaVerify`, `WeeklyBackupVerify`) disabled. The
+PowerShell wrappers continue as legacy workers. 14-night soak in
+progress; disabled tasks are deleted and their XMLs archived only
+after a clean soak.
+
+**Control-plane API + clients** (post-cutover, kopia-0dr):
+
+- `GET /api/metrics` job aggregation — success rate, p50/p95
+  duration, exit-code histogram, last-N strip (`f91e7f7`,
+  kopia-0dr.17).
+- `POST /api/admin/reload` live config reload, SHA-256 gated, 409 on
+  a running-job conflict (`4898659`, kopia-0dr.16).
+- `backup-dump.exe --server-url` REST client mode (`a7054a1`,
+  kopia-0dr.12) and `backup-monitor.exe --server-url` dashboard
+  client mode (`45674a9`, kopia-0dr.13), both over a zero-dependency
+  loopback HTTP client.
+- DPAPI `@dpapi:<path>` env references resolved at worker spawn
+  (`14ba828`, kopia-0dr.21) and a WinRT native-toast pipeline
+  (same commit, kopia-0dr.20).
+- `backup-server-tray.exe` — system-tray client of the REST API
+  (`838b1c7`, kopia-0dr.1).
+
+**Still planned**: Phase 2.x native Rust workers (`kopia-file`,
+`kopia-block`) replacing the PowerShell wrappers; only then do the
+gated toast/DPAPI defaults flip from opt-in. See §5.5 and §7.
+
 ## 4. Lessons learned (from the 2026-05-14 session)
 
 Every one of these is a structural lesson, not just a specific bug to
