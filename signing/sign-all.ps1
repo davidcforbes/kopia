@@ -75,6 +75,7 @@ $targets = @(
     'C:\dev\backup-monitor\target\release\backup-dump.exe',
     'C:\dev\backup-monitor\target\release\backup-indexer.exe',
     'C:\dev\backup-monitor\target\release\backup-server.exe',   # kopia-0dr.10
+    'C:\dev\backup-monitor\target\release\backup-server-tray.exe', # kopia-0dr.1
     "$repo\scripts\repo_status_check.ps1",
     "$repo\scripts\check_backup_errors.ps1"
 )
@@ -160,9 +161,9 @@ if ($bad -gt 0) { throw "$bad file(s) have non-Valid signatures." }
 Write-Host 'All signatures valid.' -ForegroundColor Green
 
 # Refresh bare-metal recovery cache at D:\Recovery (kopia-2xy). Copies the
-# six core .exe binaries (kopia, backup-monitor, backup-mirror, backup-dump,
-# backup-indexer, backup-server) into D:\Recovery only if their content
-# actually changed,
+# seven core .exe binaries (kopia, backup-monitor, backup-mirror, backup-dump,
+# backup-indexer, backup-server, backup-server-tray) into D:\Recovery only if
+# their content actually changed,
 # so successful sign-all runs that don't touch any exe are a no-op.
 # Silently skipped if D:\Recovery doesn't exist (clean-host or DR not yet
 # configured); user can mkdir D:\Recovery to opt in.
