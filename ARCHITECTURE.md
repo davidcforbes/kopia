@@ -20,6 +20,15 @@ place. They are now.
 
 ## Components
 
+> **As-built vs target.** The table below is the *current* stack. The
+> *target* is the **RustBack** 5-executable topology — `backup-server`
+> + `backup-monitor` + `backup-blockcopy` + `backup-filecopy` +
+> `backup-mirror` — defined canonically in
+> [`architecture-vision.md` §5.7](architecture-vision.md). `backup-dump`
+> and `backup-indexer` fold into `backup-server` as modules; the
+> native workers progressively retire `kopia.exe` and `wbadmin`.
+> Build/test is tracked by beads `kopia-0dr.37`–`.45`.
+
 | Binary                 | Path                                                      | Role                                                                     |
 |------------------------|-----------------------------------------------------------|--------------------------------------------------------------------------|
 | `kopia.exe`            | `C:\Users\david\go\bin\kopia.exe`                         | Snapshot/restore engine. Built from this fork (`go install ./...`).      |

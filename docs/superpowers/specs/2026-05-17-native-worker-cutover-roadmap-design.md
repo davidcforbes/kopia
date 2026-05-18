@@ -29,9 +29,18 @@ scope, sequencing, and cutover mechanics for all of them.
 | **0** | New-stack stabilization | — | Fix `kopia-0dr.28` (P0 worker-join deadlock), `.29` (P1 orphan-sweep clobber); land stall-watch `.23/.24/.25` |
 | **1** | Native replica | `daily_d_replica.ps1` | `backup-mirror` speaks the worker contract (structured progress events on stderr); `backup-server` invokes it directly; the script's preflight (ACL checks, flag files, heartbeat) moves into job config / the worker |
 | **2** | Native verify | `weekly_replica_verify.ps1`, `verify_backups.cmd` | `backup-verify` worker with two modes — replica-verify (repository check against `E:`) and image-verify (VHDX integrity) |
-| **3** | Native file snapshot/restore | `daily_kopia_backup.cmd` + the `kopia.exe` dependency | `backup-file` binary embedding pinned `rustic_core`; subcommands snapshot/restore/verify/prune/list/find/mount; Windows metadata layer (ACL/ADS/reparse/sparse — `architecture-vision.md` §6.0); VSS shadow-copy handoff; long-running `--query-mode` worker (§5.6). **Decomposes into its own spec.** |
-| **4** | Native block image | `wbadmin` | `backup-image` worker — VHDX from VSS (`windows::Win32::Storage::{Vhd,Vss}` + the `ntfs` crate + shelling to `bcdboot`; §6.2); chunk-CBT incrementals reusing `backup-mirror` |
+| **3** | Native file snapshot/restore | `daily_kopia_backup.cmd` + the `kopia.exe` dependency | `backup-filecopy` binary embedding pinned `rustic_core`; subcommands snapshot/restore/verify/prune/list/find/mount; Windows metadata layer (ACL/ADS/reparse/sparse — `architecture-vision.md` §6.0); VSS shadow-copy handoff; long-running `--query-mode` worker (§5.6). **Decomposes into its own spec.** |
+| **4** | Native block image | `wbadmin` | `backup-blockcopy` worker — VHDX from VSS (`windows::Win32::Storage::{Vhd,Vss}` + the `ntfs` crate + shelling to `bcdboot`; §6.2); chunk-CBT incrementals reusing `backup-mirror` |
 | **5** | USN change-tracking speed layer | — | Per-volume USN cursor persisted in `backup-server`; hands each worker a changed-file/range hint (`kopia-1tr`, `kopia-61n`); the hint is a speed signal, never ground truth — workers fall back to a full pass when the journal can't prove cleanliness |
+
+> **Topology note (2026-05-17).** The RustBack end state is the
+> 5-executable topology in `architecture-vision.md` §5.7:
+> `backup-server` + `backup-monitor` + `backup-blockcopy` +
+> `backup-filecopy` + `backup-mirror`. `backup-indexer` and
+> `backup-dump` are *not* workers — they fold into `backup-server`
+> as in-process modules; `backup-server-tray` folds into
+> `backup-monitor`. Build/test for all of this is tracked by beads
+> `kopia-0dr.37`–`.45`.
 
 ## 3. Sequencing
 
@@ -119,17 +128,17 @@ repository check against `E:`) and `verify_backups.cmd` (wbadmin VHDX
 integrity). Two verify modes behind one binary.
 
 ### 3 — Native file snapshot/restore
-`backup-file` binary embedding `rustic_core` at a pinned exact version
+`backup-filecopy` binary embedding `rustic_core` at a pinned exact version
 (`architecture-vision.md` §6.0). Subcommands snapshot/restore/verify/
 prune/list/find/mount. Windows metadata (ACL/ADS/reparse/sparse) via an
 upstream PR to `rustic_core` or a surgical fork of the three relevant
 modules. VSS shadow-copy mount root handed to `LocalSource` by the
-orchestrator. A single long-running `backup-file --query-mode` worker
+orchestrator. A single long-running `backup-filecopy --query-mode` worker
 serves UI reads (§5.6 decision b). This sub-project is large enough to
 warrant its own brainstorm + spec before implementation.
 
 ### 4 — Native block image
-`backup-image` worker producing a bootable VHDX from a VSS snapshot —
+`backup-blockcopy` worker producing a bootable VHDX from a VSS snapshot —
 `windows::Win32::Storage::{Vhd,Vss}`, the `ntfs` crate, shelling to
 `bcdboot` for the boot record (§6.2). Incrementals via the
 `backup-mirror` chunk-CBT engine. Acceptance includes one verified
@@ -151,7 +160,7 @@ mismatch / first run. Builds on the open beads `kopia-1tr` and
 - **Windows-metadata fidelity** in the file tier — security
   descriptors, ADS, reparse points, sparse files must survive a
   snapshot/restore round-trip.
-- **`backup-image` is net-new** — no upstream imaging engine to
+- **`backup-blockcopy` is net-new** — no upstream imaging engine to
   inherit; VHDX + VSS + boot-record correctness is all our code.
 - **Synthetic fixtures must be trustworthy** — the operator's real
   data is never the test bed, so fixture quality is load-bearing for

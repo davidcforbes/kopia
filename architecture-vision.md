@@ -356,36 +356,34 @@ existence**, and is the right reason to do it.
 ### 5.1 Three planes, hard boundaries
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│ UI plane          backup-monitor.exe (tray) +          │
-│                   future web/CLI clients               │
-│ ─────────────────────────────────────────────────────  │
-│                   API (HTTP/REST or named pipes)       │
-│ ─────────────────────────────────────────────────────  │
-│ Control plane     backup-server.exe (headless,         │
-│                   long-running, scheduler + DAG +      │
-│                   state + health monitor)              │
-│ ─────────────────────────────────────────────────────  │
-│                   Worker contract (spawn + heartbeat   │
-│                   + done/fail report)                  │
-│ ─────────────────────────────────────────────────────  │
-│ Worker plane      Replaceable: starts with kopia.exe,  │
-│                   wbadmin.exe, backup-indexer.exe,     │
-│                   backup-mirror.exe; progressively     │
-│                   replaced with native Rust workers    │
-│                   (backup-snapshot, backup-restore,    │
-│                   backup-repo, backup-image)           │
-└─────────────────────────────────────────────────────────┘
+UI plane       backup-monitor.exe — GUI + tray icon (user session);
+               future web / CLI clients
+                  │  HTTP / REST
+Control plane  backup-server.exe — headless Windows Service:
+               scheduler + DAG + state + catalog/index + run-status
+                  │  worker contract (spawn / progress JSONL / exit code)
+Worker plane   backup-blockcopy.exe · backup-filecopy.exe · backup-mirror.exe
+               — separate signed processes. Legacy kopia.exe / wbadmin
+               are retired as each native worker lands.
 ```
+
+See §5.7 for the canonical RustBack executable topology.
 
 UI never talks to workers directly. Workers never talk to UI. State
 lives in the control plane only.
 
 ### 5.2 Backup Server (control plane) — `backup-server.exe`
 
-Headless Rust binary. Runs as `\Backup\BackupServer` Task Scheduler
-entry with `LogonType=S4U`, `RunLevel=HighestAvailable`, similar to
-`\Backup\KopiaServer`.
+Headless Rust binary. **Self-installing Windows Service** (a
+`backup-server install` subcommand calls `CreateService`; SCM
+integration — `ServiceMain`, the control handler, `SERVICE_STATUS`).
+It runs with administrative privilege (enables
+`SeBackup`/`SeRestore`/`SeManageVolume`) but its logon account is the
+**`david` user account — not LocalSystem**: `wbadmin` stamps DENY
+ACEs inherited from the `E:\` root that lock out SYSTEM too (lesson
+4.11 / memory `wbadmin-acl-protection`), and workers inherit the
+server's token. (See `kopia-0dr.45`. The interim launch is the
+`BackupServerWaker` scheduled task.)
 
 Responsibilities:
 - **DAG definition**: reads a TOML/JSON config describing job types,
@@ -406,32 +404,49 @@ Responsibilities:
   (DPAPI-encrypted, same pattern as `.kopia-server-pw.dat`).
 - **Heartbeat to `heartbeat.log`** so the existing stall-guard pattern
   works against the server itself (lesson 4.3 self-applied).
+- **Catalog / index module** (in-process — retires `backup-indexer.exe`,
+  `kopia-0dr.42`): catalogs run/activity history across all workers,
+  and serves the filename restore-search index (`.names.idx`,
+  `D:\BackupMonitorIndex`). Workers *produce* the raw data (a worker
+  streams its file-list up); the server *catalogs* it — the server
+  itself never reads a repo, staying data-blind.
+- **Run-status module** (in-process — retires `backup-dump.exe`,
+  `kopia-0dr.43`): the STATUS-CARDS verdict for any run/job, plus a
+  `backup-server status` CLI subcommand so a fast CLI verdict
+  survives (CLAUDE.md Rule 1).
 
 Concrete next-investment epic: `kopia-0dr` (Backup Server).
 
 ### 5.3 Worker contract
 
-A worker is any process the server spawns to do real work. Today
-this is `kopia.exe snapshot create` or `backup-indexer.exe`. In the
-future it's `backup-snapshot --source=...`, `backup-image --vol=C:`,
-etc.
+A worker is a **separate process** the server spawns to do real
+work — `backup-blockcopy`, `backup-filecopy`, `backup-mirror`.
+Workers are processes, not modules: a worker crash, leak, or hang
+must not take down the control plane, and the server enforces
+`timeout_sec` / stall-watch by killing the worker's **process tree**
+(no thread is hard-killable). Control-plane logic — catalog, status —
+is by contrast a *module* inside `backup-server`. The rule:
+data-plane work → supervised process; control-plane logic → module.
 
-Contract:
-- Server invokes worker with `--server-url=http://127.0.0.1:NNNN`
-  and `--job-id=UUID` arguments.
-- Worker calls `POST /worker/heartbeat?job_id=UUID` every N seconds
-  with optional progress fields (bytes processed, current file,
-  etc.).
-- Worker calls `POST /worker/done?job_id=UUID&rc=N` on exit with
-  structured result.
-- Worker stdout/stderr is captured by server and tagged with
-  `job_id` in a unified log.
+Contract (as built, hardened in `kopia-0dr.28`/sub-project 1 — this
+supersedes the earlier REST-callback sketch):
+- The server spawns the worker inside a **Job Object** (process-tree
+  kill) and passes job arguments on the command line.
+- The worker emits structured **`Event::Progress` JSONL on stderr**
+  (`{"type":"progress",...}` — see `progress.rs`). It writes
+  `run_id`/`job` blank; the server's `inject_identity` stamps them.
+- The worker emits an explicit **`heartbeat` event** during long
+  no-op phases so liveness never has to be inferred.
+- Exit codes are the verdict: **0** clean, **23** partial (some
+  files errored, run continued), **1** hard failure.
+- The server captures stdout/stderr, tags it with the run, and runs
+  **stall-watch** — child-CPU-advance + file-mtime-growth liveness
+  (`kopia-0dr.23`/`.24`/`.25`) — against every worker.
 
-Workers must be **resumable** where possible (kopia snapshot create
-already is; wbadmin is not — design constraint for the Rust
-replacement). Workers must **not** silently swallow failures.
-Workers must **never** write directly to the orchestration log —
-that's the server's responsibility.
+The contract lives in a shared, documented `worker_contract` module
+(`kopia-0dr.37`) so all three workers emit a byte-identical protocol.
+Workers must **not** silently swallow failures and must **never**
+write to the orchestration log — that is the server's job.
 
 ### 5.4 UI plane — `backup-monitor.exe` becomes a thin client
 
@@ -445,21 +460,33 @@ files directly. UI is testable against a mock server. UI can be
 replaced (web UI, CLI client, mobile app) without touching the
 control plane.
 
+`backup-monitor` also **owns the tray icon** — its minimized-to-tray
+state (`kopia-0dr.44`, retires `backup-server-tray.exe`). A tray icon
+must run in the interactive user session with a message pump; the
+headless `backup-server` Service runs in Session 0 and *cannot* show
+UI. `backup-monitor` already runs in the user session, so it carries
+the tray rather than a separate executable.
+
 ### 5.5 Worker boundaries — the rewrite road map
 
 Order of replacement (easiest → hardest):
 
-| Order | Worker | Replaces | Notes |
-|---|---|---|---|
-| 1 | `backup-indexer` | (already Rust) | First worker to use the new server contract. Proves the protocol. |
-| 2 | `backup-mirror` | (already Rust) | Already structured well. Just needs to talk to server instead of being orchestrated by ps1. |
-| 3 | `backup-verify` | `weekly_replica_verify.ps1` | Eliminates the ps1 entirely. Calls kopia.exe but wraps it. |
-| 4 | `backup-image` | `wbadmin` | The hard one for Windows. Needs VSS + raw block read + VHDX write. Research outcome (§6.2): buildable in **weeks** using `windows::Win32::Storage::{Vhd,Vss}` + `ntfs` crate + shell out to `bcdboot`. Reuses `backup-mirror` chunk-CBT for incrementals. |
-| 5 | `backup-file snapshot` | `kopia snapshot create` | Subcommand of the `backup-file` binary (see §5.6). Thin wrapper around `rustic_core::Repository::backup` (file-tier decision §6.0 settled). Our value-add: handing `LocalSource` a VSS shadow-copy mount root, capturing Windows-specific metadata via the upstream-PR'd `windows_metadata` field. |
-| 6 | `backup-file restore` | `kopia restore` | Subcommand of `backup-file`. Thin wrapper around `rustic_core::Repository::restore`. Our value-add: applying the Windows metadata correctly on restore (security descriptors, ADS, reparse points, sparse). |
-| 7 | (not needed) | `kopia repository ...` | The file-tier repo layer is rustic_core's responsibility. We focus on platform integration, orchestration, and the block-image worker. |
+The worker plane is **three** binaries (`backup-indexer` is not a
+worker — it folds into the server as the catalog/index module,
+`kopia-0dr.42`). Order of replacement, easiest → hardest:
 
-Each worker is independently shippable. The system remains
+| Sub-project | Worker | Replaces | Notes |
+|---|---|---|---|
+| 1 (done) | `backup-mirror` | `daily_d_replica.ps1` | Already Rust. `replica` subcommand speaks the worker contract (`kopia-0dr.33`/`.34`). |
+| 2 | `backup-verify` | `weekly_replica_verify.ps1`, `verify_backups.cmd` | Two modes (replica-verify, backup-verify). `kopia-0dr.38`. |
+| 3 | `backup-filecopy` | `daily_kopia_backup.cmd` + `kopia.exe` | File-tier worker embedding `rustic_core` (file-tier decision §6.0). Captures Windows metadata (security descriptors, ADS, reparse, sparse) on snapshot and restore. Hardest sub-project — gets its own brainstorm/spec; eval strategy is `kopia-0dr.35`. Bead `kopia-0dr.39`. |
+| 4 | `backup-blockcopy` | `wbadmin` | Block-image worker — VSS + raw block read + bootable VHDX write. Research outcome (§6.2): buildable in **weeks** using `windows::Win32::Storage::{Vhd,Vss}` + `ntfs` crate + `bcdboot`. Reuses `backup-mirror` chunk-CBT for incrementals. Bead `kopia-0dr.40`. |
+| 5 | (server module) | — | USN change-tracking speed layer in `backup-server` (`kopia-0dr.41`). |
+
+`backup-filecopy` and `backup-blockcopy` were called `backup-file`
+and `backup-image` in earlier drafts; the names now describe the
+action (file-level vs block-level copy), not a vendored library or
+mechanism. Each worker is independently shippable. The system remains
 production-grade throughout because old workers keep running until
 their replacement is proven via parallel-evaluation (the kopia-bmy.3
 cutover pattern).
@@ -471,29 +498,24 @@ binary or a service. The question is which of our binaries link it
 against and which never touch it. The split is opinionated and tight:
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│ UI plane:      backup-monitor.exe       — NO rustic_core   │
-│                (thin client; queries server via HTTP)      │
-├────────────────────────────────────────────────────────────┤
-│ Control plane: backup-server.exe        — NO rustic_core   │
-│                (orchestrator only; manages workers)        │
-├────────────────────────────────────────────────────────────┤
-│ Worker plane:                                              │
-│   File-tier (one binary, multiple subcommands):            │
-│     backup-file snapshot                — YES rustic_core  │
-│     backup-file restore                 — YES rustic_core  │
-│     backup-file verify  (a.k.a. check)  — YES rustic_core  │
-│     backup-file prune                   — YES rustic_core  │
-│     backup-file list / find             — YES rustic_core  │
-│     backup-file mount  (snapshot FUSE)  — YES rustic_core  │
-│   Block-tier:                                              │
-│     backup-image                        — NO  rustic_core  │
-│   Local-replica:                                           │
-│     backup-mirror     (chunk-CBT D:→E:) — NO  rustic_core  │
-│   Search-aid:                                              │
-│     backup-indexer    (filename .idx)   — YES (read-only)  │
-└────────────────────────────────────────────────────────────┘
+UI plane:      backup-monitor.exe        — NO  rustic_core
+               (thin client; queries the server via HTTP; tray)
+Control plane: backup-server.exe         — NO  rustic_core
+               (orchestrator; catalog/index + run-status modules;
+               data-blind — never reads a repo)
+Worker plane:
+  backup-filecopy   (snapshot/restore/   — YES rustic_core
+                     verify/prune/list/find/mount subcommands;
+                     also walks the repo read-only to produce the
+                     file-list the server's index module catalogs)
+  backup-blockcopy  (VSS → bootable VHDX) — NO  rustic_core
+  backup-mirror     (chunk-CBT D:→E:)     — NO  rustic_core
 ```
+
+The filename restore-search index (`.names.idx`) is *served* by the
+`backup-server` catalog module but its data is *produced* by
+`backup-filecopy`'s read-only repo walk — there is no separate
+`backup-indexer` binary.
 
 **Why `backup-file` is one binary with subcommands, not many binaries**:
 
@@ -560,6 +582,33 @@ production stack that map 1:1 to rustic_core):
 - `kopia maintenance run --full` → `backup-file prune` (kopia's
   full maintenance ≈ rustic prune in scope)
 - `kopia snapshot list` → `backup-file list`
+
+### 5.7 Target executable topology — RustBack (canonical)
+
+The platform is **RustBack**. The end state is **five executables** —
+settled 2026-05-17 (architecture discussion, user-approved). This
+table is the single canonical reference; §5.1–5.6 elaborate it.
+
+| # | Executable | Plane | Role |
+|---|---|---|---|
+| 1 | `backup-server.exe` | control | orchestrator + REST API + state; **catalog/index** and **run-status** as in-process modules; self-installing **Windows Service**, logon account `david` |
+| 2 | `backup-monitor.exe` | UI | primary GUI; **owns the tray icon** (user session) |
+| 3 | `backup-blockcopy.exe` | worker | block/image — `wbadmin`-equivalent, VSS → bootable VHDX |
+| 4 | `backup-filecopy.exe` | worker | file-tier — embeds `rustic_core` |
+| 5 | `backup-mirror.exe` | worker | drive replica / mirror |
+
+Decisions baked in:
+- **Process vs module:** data-plane work → a separate supervised
+  process (workers); control-plane logic → a module in
+  `backup-server` (catalog/index, run-status).
+- **Workers produce, server catalogs:** workers stream raw data
+  (file-lists, run status) up; the server catalogs it and never
+  reads a repo — it stays data-blind.
+- **Retired binaries:** `backup-server-tray.exe` → folded into
+  `backup-monitor`; `backup-dump.exe` + `backup-indexer.exe` →
+  folded into `backup-server` as modules.
+
+Build + test are tracked by beads `kopia-0dr.37`–`.45`.
 
 ## 6. Open questions — research pending
 
@@ -1171,6 +1220,13 @@ until v1.0:
 | 2026-05-14 | Window scope first; Linux/macOS deferred | Match user's actual environment, narrow v1 | Active |
 | 2026-05-14 | Apache-2.0 license preference (TBC) | Compat with kopia, common in Rust crypto ecosystem | Tentative |
 | 2026-05-14 | File-tier foundation: embed `rustic_core` at pinned release (`=0.11.x`), Cargo.lock committed, never track main | Code+architecture review confirmed quality (typestate API, streaming I/O, structured errors, library-first design, Apache/MIT no-CLA). Bus factor of 1 mitigated by restic-format compatibility (emergency exit via restic). Saves 6-18 months of reimplementation. | Settled |
+| 2026-05-17 | RustBack target = **5 executables**: `backup-server`, `backup-monitor`, `backup-blockcopy`, `backup-filecopy`, `backup-mirror` (§5.7) | Architecture discussion, user-approved. One control plane + one UI + three workers — minimal, clear boundaries. | Settled |
+| 2026-05-17 | Workers are separate supervised **processes**; control-plane logic is **modules** in `backup-server` | Process isolation (crash/leak/hang containment), Job-Object hard-kill (no thread is killable), the as-built worker contract. Rule: data-plane → process, control-plane → module. | Settled |
+| 2026-05-17 | `backup-dump` + `backup-indexer` retired into `backup-server` as modules; workers produce data, server catalogs it | They are control-plane logic over data the server already holds; the server stays data-blind because workers (not the server) read repos. | Settled |
+| 2026-05-17 | `backup-server-tray.exe` retired — the tray icon folds into `backup-monitor` | A tray needs the interactive user session; the headless Session-0 Service can't show UI; `backup-monitor` already runs in the user session. | Settled |
+| 2026-05-17 | Renames: `backup-image`→`backup-blockcopy`, `backup-file`→`backup-filecopy` | Names should describe the action (block vs file copy), not a mechanism (VSS) or a vendored crate (`rustic`). | Settled |
+| 2026-05-17 | `backup-server` is a self-installing Windows Service, logon account `david` — **not** LocalSystem | Headless/session-independent needs Service shape; `wbadmin` DENY ACEs on `E:\` lock out SYSTEM too, and workers inherit the server token (`kopia-0dr.45`). | Settled |
+| 2026-05-17 | Worker contract is structured `Event::Progress` JSONL on stderr + exit codes 0/23/1 + Job-Object kill + stall-watch — **not** the earlier REST-callback sketch | The as-built, sub-project-0-hardened contract; promoted to a shared documented `worker_contract` module (`kopia-0dr.37`). | Settled |
 | 2026-05-14 | VSS integration lives in our orchestrator, not in rustic_core | LocalSource takes a path; we hand it the shadow-copy mount root. Matches restic-the-CLI pattern. No fork needed. | Settled |
 | 2026-05-14 | NTFS ACL / ADS / reparse / sparse handling via upstream PR (opt-in `windows_metadata` field on `Metadata`) | Issue #19 is `help wanted`. Apache/MIT no CLA. Opt-in preserves restic format compat when absent. | Settled |
 | 2026-05-14 | Fork-as-fallback: if upstream stalls 3+ months on the Windows metadata PR, fork ONLY `backend/node.rs`, `backend/local_destination.rs`, `Metadata` — never the whole crate | Keeps upstream merge surface minimal; everything else continues to flow from upstream. | Settled |
