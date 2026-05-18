@@ -57,7 +57,7 @@ duplicate names, no unknown `depends_on`), and exits.
 
 The server is not a long-running service in Phase 1.3 — it is woken
 per job. One scheduled task per job invokes
-`backup-server --run-once --job <name>`. The XMLs live in
+`rustback-server --run-once --job <name>`. The XMLs live in
 [`../scripts/scheduled-tasks/`](../scripts/scheduled-tasks/)
 (`RustBackWaker-*.xml`).
 

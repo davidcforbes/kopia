@@ -38,10 +38,10 @@ to remain anonymous.
 
 **In scope** — report these:
 
-- `backup-server` — the control-plane orchestrator: REST API, DAG
+- `rustback-server` — the control-plane orchestrator: REST API, DAG
   runner, worker subprocess supervision, config parsing, state store.
-- `backup-server-tray`, and the `--server-url` REST client modes of
-  `backup-dump` / `rustback`.
+- `rustback-tray`, and the `--server-url` REST client modes of
+  `rustback-dump` / `rustback`.
 - The future native Rust workers (`kopia-file`, `kopia-block`) once
   they ship.
 - The repository format and any encryption/secret-handling code in

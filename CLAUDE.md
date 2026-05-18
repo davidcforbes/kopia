@@ -199,9 +199,9 @@ look for UI source code in this repo.
 - Policy system is hierarchical: global → host → user@host → path.
 - Format versioning (`repo/format/`) supports multiple versions for backward compatibility.
 
-## Rule 3 — Performance work on backup-mirror: consult the optimization landscape
+## Rule 3 — Performance work on rustback-mirror: consult the optimization landscape
 
-Before designing any speedup to `backup-mirror` (parallelism, change
+Before designing any speedup to `rustback-mirror` (parallelism, change
 detection, I/O patterns), read the **Performance optimization landscape**
 section in [`ARCHITECTURE.md`](ARCHITECTURE.md). It is the authoritative
 inventory of NTFS change-detection primitives and parallelism opportunities

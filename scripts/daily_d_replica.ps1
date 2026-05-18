@@ -190,15 +190,15 @@ $summary     = @{
     source          = $src
     target          = $dst.TrimEnd('\')
     mode            = $mode
-    bytes           = 0           # sum of bytes_written across all backup-mirror invocations
-    files           = 0           # sum of files_total across all backup-mirror invocations
+    bytes           = 0           # sum of bytes_written across all rustback-mirror invocations
+    files           = 0           # sum of files_total across all rustback-mirror invocations
     errors          = 1           # default fail; cleared on PASS path
     duration_s      = 0
-    robocopy_rc     = -1          # worst exit code across all backup-mirror invocations (legacy field name preserved for backup-dump compat)
+    robocopy_rc     = -1          # worst exit code across all rustback-mirror invocations (legacy field name preserved for rustback-dump compat)
     chunks_changed  = 0           # sum of chunks_changed across all invocations
     chunks_total    = 0           # sum of chunks_total across all invocations
     shadow_id       = '-'
-    tool            = 'backup-mirror'
+    tool            = 'rustback-mirror'
 }
 
 try {
@@ -308,8 +308,8 @@ try {
         Write-Log "shadow mounted: $shadowMount -> $($shadow.DeviceObject)" 'vss'
     }
 
-    # ---- Phase 2: backup-mirror chunk-CBT (replaces cwRsync, kopia-bmy.3) ----
-    # Single tooling for the whole D: -> E: mirror. One backup-mirror invocation
+    # ---- Phase 2: rustback-mirror chunk-CBT (replaces cwRsync, kopia-bmy.3) ----
+    # Single tooling for the whole D: -> E: mirror. One rustback-mirror invocation
     # per top-level subtree on D:\ (via shadow). Mode is always cbt; the
     # manifest-key differs:
     #   - WindowsImageBackup: --manifest-key basename. wbadmin renames the
@@ -320,7 +320,7 @@ try {
     #     stable so relpath keying gives correct identity.
     #
     # System / transient dirs are excluded by name. Top-level loose files
-    # (e.g. the Win11 ISO at D:\ root) are mirrored via backup-mirror's
+    # (e.g. the Win11 ISO at D:\ root) are mirrored via rustback-mirror's
     # single-file cbt mode (kopia-2ls); pagefile/swapfile/hiberfil and
     # similar Windows transients are excluded explicitly.
     #
@@ -349,13 +349,13 @@ try {
     # note above; the only such file is the Win11 ISO).
     #
     # Sysmon: rsync excluded *.sdb-wal/*.sdb-shm because those are open-file
-    # transient state with ACLs that deny even via VSS shadow. backup-mirror
+    # transient state with ACLs that deny even via VSS shadow. rustback-mirror
     # has no --exclude flag, so hitting one of those files would abort the
-    # Sysmon subtree mid-run. Skip the whole subtree until backup-mirror
+    # Sysmon subtree mid-run. Skip the whole subtree until rustback-mirror
     # gains per-file-skip semantics. Sysmon is local telemetry, regenerable.
     # Excludes apply to both directories and top-level files: Recycle Bin and
     # Volume Information are NTFS system; RustBackIndex is a known
-    # local-state dir; Sysmon is open-file transient that backup-mirror
+    # local-state dir; Sysmon is open-file transient that rustback-mirror
     # can't safely mirror without per-file-skip semantics. File excludes
     # catch pagefile/swapfile/hiberfil if D: is ever configured as a paging
     # target.
@@ -396,7 +396,7 @@ try {
 
         # WindowsImageBackup uses --manifest-key basename so the per-VHDX CBT
         # manifest is keyed by the source-disk GUID (stable across wbadmin's
-        # nightly dated-folder rotation). But backup-mirror still computes
+        # nightly dated-folder rotation). But rustback-mirror still computes
         # each file's dst path as dst_root.join(rel-from-src) — so when
         # wbadmin's parent folder rotates (Backup 2026-05-14 → Backup
         # 2026-05-15) the dst at the new name is empty even though the
@@ -524,13 +524,13 @@ try {
         if ($rc -gt $worstRc) { $worstRc = $rc }
 
         # Parse the final stdout summary line:
-        #   "backup-mirror summary mode=cbt files_total=X files_first_run=Y
+        #   "rustback-mirror summary mode=cbt files_total=X files_first_run=Y
         #    files_torn_recovered=Z chunks_total=A chunks_changed=B
         #    chunks_zero=C bytes_read=D bytes_written=E duration_s=F errors=G"
         $bytes = 0; $files = 0; $chunksTot = 0; $chunksChg = 0
         if (Test-Path -LiteralPath $summaryOut) {
             $sumLine = Get-Content -LiteralPath $summaryOut -Tail 5 |
-                       Where-Object { $_ -match '^backup-mirror summary ' } |
+                       Where-Object { $_ -match '^rustback-mirror summary ' } |
                        Select-Object -Last 1
             if ($sumLine) {
                 foreach ($tok in ($sumLine -split '\s+')) {
@@ -574,7 +574,7 @@ try {
 
     if ($worstRc -ne 0) {
         $failedTrees = ($perTreeReports | Where-Object { $_.rc -ne 0 } | ForEach-Object { "$($_.tree)=$($_.rc)" }) -join ', '
-        throw "backup-mirror failed on: $failedTrees (worst rc=$worstRc; per-tree logs in $runLogDir)"
+        throw "rustback-mirror failed on: $failedTrees (worst rc=$worstRc; per-tree logs in $runLogDir)"
     }
     Write-Log ("all subtrees PASS: trees={0} total_bytes_written={1} total_files={2} chunks_changed/total={3}/{4}" -f `
         $perTreeReports.Count, $aggBytes, $aggFiles, $aggChunksChg, $aggChunksTot) 'mirror'

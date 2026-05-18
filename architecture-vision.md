@@ -139,7 +139,7 @@ subprocess worker supervision, stdout `summary` parsing, retry policy.
   passed) end-to-end through REST (2026-05-16).
 
 **Phase 1.3 — cutover** (executed 2026-05-17, kopia-0dr.4).
-`backup-server --run-once --job <name>` single-job mode (`11e7b1b`).
+`rustback-server --run-once --job <name>` single-job mode (`11e7b1b`).
 Four `\Backup\RustBackWaker-*` scheduled tasks registered
 (`Priority=5`, `InteractiveToken`, `HighestAvailable`); the four
 legacy prod tasks (`DailyKopiaSnapshotV2`, `DailyDReplica`,
@@ -192,7 +192,7 @@ class.
 `daily_kopia.log` for specific magic strings ("Daily Kopia backup
 complete", "Exit codes:", "RUN" if no completion line). Today the
 wrapper finished its snapshot phase but was still running the indexer
-phase, so the log lacked the completion line, so backup-dump scored
+phase, so the log lacked the completion line, so rustback-dump scored
 the run as RUN, so the STATUS CARD looked stale, so the user thought
 the replica had failed. The data was actually fine. **A real
 orchestrator owns its state; consumers query it. Don't make every
@@ -309,7 +309,7 @@ BOTH the live paths AND the corresponding shadow namespace
 Added 2026-05-15. `wbadmin` creates a fresh dated folder per backup
 (`Backup 2026-05-15 090023` → `Backup 2026-05-16 …` the next night)
 and keeps only the latest on the source side. Any mirror tool that
-keys per-file state by basename (e.g. backup-mirror's per-VHDX CBT
+keys per-file state by basename (e.g. rustback-mirror's per-VHDX CBT
 manifest) needs the wrapper to **rename the destination dated
 folder to match source before invoking the mirror** — otherwise
 every rotation creates an empty new dst path, the basename manifest
@@ -346,7 +346,7 @@ for ` — replica summary ` (em-dash) or ` - replica summary `
 (single hyphen). Double-dash was silently skipped, so the
 dashboard's "Replica last OK" was frozen at the last rsync-era
 em-dash entry (2026-05-11) for four nights even after successful
-backup-mirror runs. Fixed 2026-05-15 (`kopia-wp4`). **The Backup
+rustback-mirror runs. Fixed 2026-05-15 (`kopia-wp4`). **The Backup
 Server's worker contract — structured JSON-over-HTTP rather than
 log-line magic — removes this entire class of bug from
 existence**, and is the right reason to do it.
@@ -362,7 +362,7 @@ UI plane       rustback-monitor.exe — GUI + tray icon (user session);
 Control plane  rustback-server.exe — headless Windows Service:
                scheduler + DAG + state + catalog/index + run-status
                   │  worker contract (spawn / progress JSONL / exit code)
-Worker plane   backup-blockcopy.exe · backup-filecopy.exe · rustback-mirror.exe
+Worker plane   rustback-blockcopy.exe · rustback-filecopy.exe · rustback-mirror.exe
                — separate signed processes. Legacy kopia.exe / wbadmin
                are retired as each native worker lands.
 ```
@@ -375,7 +375,7 @@ lives in the control plane only.
 ### 5.2 Backup Server (control plane) — `rustback-server.exe`
 
 Headless Rust binary. **Self-installing Windows Service** (a
-`backup-server install` subcommand calls `CreateService`; SCM
+`rustback-server install` subcommand calls `CreateService`; SCM
 integration — `ServiceMain`, the control handler, `SERVICE_STATUS`).
 It runs with administrative privilege (enables
 `SeBackup`/`SeRestore`/`SeManageVolume`) but its logon account is the
@@ -412,7 +412,7 @@ Responsibilities:
   itself never reads a repo, staying data-blind.
 - **Run-status module** (in-process — retires `rustback-dump.exe`,
   `kopia-0dr.43`): the STATUS-CARDS verdict for any run/job, plus a
-  `backup-server status` CLI subcommand so a fast CLI verdict
+  `rustback-server status` CLI subcommand so a fast CLI verdict
   survives (CLAUDE.md Rule 1).
 
 Concrete next-investment epic: `kopia-0dr` (Backup Server).
@@ -420,12 +420,12 @@ Concrete next-investment epic: `kopia-0dr` (Backup Server).
 ### 5.3 Worker contract
 
 A worker is a **separate process** the server spawns to do real
-work — `backup-blockcopy`, `backup-filecopy`, `backup-mirror`.
+work — `rustback-blockcopy`, `rustback-filecopy`, `rustback-mirror`.
 Workers are processes, not modules: a worker crash, leak, or hang
 must not take down the control plane, and the server enforces
 `timeout_sec` / stall-watch by killing the worker's **process tree**
 (no thread is hard-killable). Control-plane logic — catalog, status —
-is by contrast a *module* inside `backup-server`. The rule:
+is by contrast a *module* inside `rustback-server`. The rule:
 data-plane work → supervised process; control-plane logic → module.
 
 Contract (as built, hardened in `kopia-0dr.28`/sub-project 1 — this
@@ -463,7 +463,7 @@ control plane.
 `rustback` also **owns the tray icon** — its minimized-to-tray
 state (`kopia-0dr.44`, retires `rustback-tray.exe`). A tray icon
 must run in the interactive user session with a message pump; the
-headless `backup-server` Service runs in Session 0 and *cannot* show
+headless `rustback-server` Service runs in Session 0 and *cannot* show
 UI. `rustback` already runs in the user session, so it carries
 the tray rather than a separate executable.
 
@@ -471,19 +471,19 @@ the tray rather than a separate executable.
 
 Order of replacement (easiest → hardest):
 
-The worker plane is **three** binaries (`backup-indexer` is not a
+The worker plane is **three** binaries (`rustback-indexer` is not a
 worker — it folds into the server as the catalog/index module,
 `kopia-0dr.42`). Order of replacement, easiest → hardest:
 
 | Sub-project | Worker | Replaces | Notes |
 |---|---|---|---|
-| 1 (done) | `backup-mirror` | `daily_d_replica.ps1` | Already Rust. `replica` subcommand speaks the worker contract (`kopia-0dr.33`/`.34`). |
-| 2 | `backup-verify` | `weekly_replica_verify.ps1`, `verify_backups.cmd` | Two modes (replica-verify, backup-verify). `kopia-0dr.38`. |
-| 3 | `backup-filecopy` | `daily_kopia_backup.cmd` + `kopia.exe` | File-tier worker embedding `rustic_core` (file-tier decision §6.0). Captures Windows metadata (security descriptors, ADS, reparse, sparse) on snapshot and restore. Hardest sub-project — gets its own brainstorm/spec; eval strategy is `kopia-0dr.35`. Bead `kopia-0dr.39`. |
-| 4 | `backup-blockcopy` | `wbadmin` | Block-image worker — VSS + raw block read + bootable VHDX write. Research outcome (§6.2): buildable in **weeks** using `windows::Win32::Storage::{Vhd,Vss}` + `ntfs` crate + `bcdboot`. Reuses `backup-mirror` chunk-CBT for incrementals. Bead `kopia-0dr.40`. |
-| 5 | (server module) | — | USN change-tracking speed layer in `backup-server` (`kopia-0dr.41`). |
+| 1 (done) | `rustback-mirror` | `daily_d_replica.ps1` | Already Rust. `replica` subcommand speaks the worker contract (`kopia-0dr.33`/`.34`). |
+| 2 | `rustback-verify` | `weekly_replica_verify.ps1`, `verify_backups.cmd` | Two modes (one for the E:\ replica, one for the kopia backup repo). `kopia-0dr.38`. |
+| 3 | `rustback-filecopy` | `daily_kopia_backup.cmd` + `kopia.exe` | File-tier worker embedding `rustic_core` (file-tier decision §6.0). Captures Windows metadata (security descriptors, ADS, reparse, sparse) on snapshot and restore. Hardest sub-project — gets its own brainstorm/spec; eval strategy is `kopia-0dr.35`. Bead `kopia-0dr.39`. |
+| 4 | `rustback-blockcopy` | `wbadmin` | Block-image worker — VSS + raw block read + bootable VHDX write. Research outcome (§6.2): buildable in **weeks** using `windows::Win32::Storage::{Vhd,Vss}` + `ntfs` crate + `bcdboot`. Reuses `rustback-mirror` chunk-CBT for incrementals. Bead `kopia-0dr.40`. |
+| 5 | (server module) | — | USN change-tracking speed layer in `rustback-server` (`kopia-0dr.41`). |
 
-`backup-filecopy` and `backup-blockcopy` were called `backup-file`
+`rustback-filecopy` and `rustback-blockcopy` were called `backup-file`
 and `backup-image` in earlier drafts; the names now describe the
 action (file-level vs block-level copy), not a vendored library or
 mechanism. Each worker is independently shippable. The system remains
@@ -504,18 +504,18 @@ Control plane: rustback-server.exe         — NO  rustic_core
                (orchestrator; catalog/index + run-status modules;
                data-blind — never reads a repo)
 Worker plane:
-  backup-filecopy   (snapshot/restore/   — YES rustic_core
+  rustback-filecopy (snapshot/restore/   — YES rustic_core
                      verify/prune/list/find/mount subcommands;
                      also walks the repo read-only to produce the
                      file-list the server's index module catalogs)
-  backup-blockcopy  (VSS → bootable VHDX) — NO  rustic_core
-  backup-mirror     (chunk-CBT D:→E:)     — NO  rustic_core
+  rustback-blockcopy (VSS → bootable VHDX) — NO  rustic_core
+  rustback-mirror   (chunk-CBT D:→E:)     — NO  rustic_core
 ```
 
 The filename restore-search index (`.names.idx`) is *served* by the
-`backup-server` catalog module but its data is *produced* by
-`backup-filecopy`'s read-only repo walk — there is no separate
-`backup-indexer` binary.
+`rustback-server` catalog module but its data is *produced* by
+`rustback-filecopy`'s read-only repo walk — there is no separate
+`rustback-indexer` binary.
 
 **Why `backup-file` is one binary with subcommands, not many binaries**:
 
@@ -560,13 +560,13 @@ don't accidentally try):
 - **Orchestration** — Backup Server (our control plane).
 - **Block-level system imaging** — `backup-image` worker (VHDX from
   VSS, our own code; see §6.2).
-- **Local-disk replica** — `backup-mirror` (chunk-CBT byte-level,
+- **Local-disk replica** — `rustback-mirror` (chunk-CBT byte-level,
   format-agnostic — operates on bytes regardless of what's stored).
 - **Windows-specific metadata layer** — security descriptors, ADS,
   reparse points, sparse. Captured via the upstream PR to rustic_core
   (`windows_metadata` field on `Metadata`) OR our surgical fork of
   the three relevant modules (see §6.0).
-- **Filename search index** — `backup-indexer` writes our own
+- **Filename search index** — `rustback-indexer` writes our own
   `.names.idx` format under `D:RustBackIndex`. Uses rustic_core
   read-only to walk snapshots but maintains its own index format
   (the kopia REST API equivalence gap documented in memory
@@ -593,20 +593,20 @@ table is the single canonical reference; §5.1–5.6 elaborate it.
 |---|---|---|---|
 | 1 | `rustback-server.exe` | control | orchestrator + REST API + state; **catalog/index** and **run-status** as in-process modules; self-installing **Windows Service**, logon account `david` |
 | 2 | `rustback-monitor.exe` | UI | primary GUI; **owns the tray icon** (user session) |
-| 3 | `backup-blockcopy.exe` | worker | block/image — `wbadmin`-equivalent, VSS → bootable VHDX |
-| 4 | `backup-filecopy.exe` | worker | file-tier — embeds `rustic_core` |
+| 3 | `rustback-blockcopy.exe` | worker | block/image — `wbadmin`-equivalent, VSS → bootable VHDX |
+| 4 | `rustback-filecopy.exe` | worker | file-tier — embeds `rustic_core` |
 | 5 | `rustback-mirror.exe` | worker | drive replica / mirror |
 
 Decisions baked in:
 - **Process vs module:** data-plane work → a separate supervised
   process (workers); control-plane logic → a module in
-  `backup-server` (catalog/index, run-status).
+  `rustback-server` (catalog/index, run-status).
 - **Workers produce, server catalogs:** workers stream raw data
   (file-lists, run status) up; the server catalogs it and never
   reads a repo — it stays data-blind.
 - **Retired binaries:** `rustback-tray.exe` → folded into
   `rustback`; `rustback-dump.exe` + `rustback-indexer.exe` →
-  folded into `backup-server` as modules.
+  folded into `rustback-server` as modules.
 
 Build + test are tracked by beads `kopia-0dr.37`–`.45`.
 
@@ -811,7 +811,7 @@ Pragmatic architecture for the `backup-image` worker:
    crate / `FSCTL_QUERY_ALLOCATED_RANGES`.
 5. Stream only allocated blocks into the VHDX (skip unallocated).
 6. On subsequent runs, chunk-CBT against the prior image — reuses
-   `backup-mirror`'s existing 4 MiB chunk infrastructure.
+   `rustback-mirror`'s existing 4 MiB chunk infrastructure.
 7. For restore: `diskpart` + mount VHDX + `bcdboot`.
 
 **The headline finding**: this is genuinely tractable. wbadmin's
@@ -936,7 +936,7 @@ and how urgent:
 
 | Kopia feature | Restic-format equivalent? | What we'd do |
 |---|---|---|
-| **Reed-Solomon error correction codes (ECC)** on pack files — defense against bit-rot in primary repo | **Restic format has none.** | Real gap. Mitigation today: the `backup-mirror` chunk-CBT replica catches divergence between D: and E: by content hash, so corruption shows up on the next replica run. Could add ECC as a sidecar (`*.ecc` files next to packs) without breaking restic compat. **Worth a beads issue to evaluate.** |
+| **Reed-Solomon error correction codes (ECC)** on pack files — defense against bit-rot in primary repo | **Restic format has none.** | Real gap. Mitigation today: the `rustback-mirror` chunk-CBT replica catches divergence between D: and E: by content hash, so corruption shows up on the next replica run. Could add ECC as a sidecar (`*.ecc` files next to packs) without breaking restic compat. **Worth a beads issue to evaluate.** |
 | **Configurable hashing algorithms** (HMAC-SHA256, HMAC-SHA224, BLAKE2B, BLAKE3) | Restic: SHA-256, recently BLAKE3 added. | Adequate. Hash choice is locked in at repo init anyway. |
 | **Configurable compression** (zstd, gzip, lz4, none, with per-level tuning) | Restic ≥0.14: zstd only, level tunable. | Adequate for v1; if it matters later, file an upstream PR for additional codecs. |
 | **Pluggable content splitters** (BUZHASH, RABIN, FIXED + sub-variants) | Restic format hardcodes RabinCDC. Rustic enum closed (`Rabin | FixedSize`). | Adequate for v1. |
@@ -1095,7 +1095,7 @@ shadows.
 ### 7.1 Freeze point: personal-use stable, OSS-dev branch
 
 Once the **current codebase** (kopia + wbadmin + rustback +
-backup-mirror + scripts/, all the work tracked in `kopia-bmy` and
+rustback-mirror + scripts/, all the work tracked in `kopia-bmy` and
 its children) reaches a stability point where the dashboard is
 green for ~14 consecutive nights with no manual intervention, we
 **freeze it as the operator's personal-use build**. Concretely:
@@ -1162,14 +1162,14 @@ release:
 |---|---|---|
 | Full disk + partition imaging (bootable VHDX/VHD) | **YES** | `backup-image` worker, §6.2 |
 | Incremental imaging via Changed Block Tracking | **YES, and via documented OS API rather than a kernel driver** | USN V4 + ALLOCATED_RANGES, §6.7. We deliberately reject Macrium's minifilter-driver approach — we get equivalent CBT semantics from documented NTFS primitives. |
-| Rapid Delta Restore (block-level fast restore) | **YES** | `backup-image` restore mode reverses the chunk-CBT manifest — only writes blocks that differ from current dst state. Same primitive as backup-mirror's existing torn-recovery path scales to restore direction. |
+| Rapid Delta Restore (block-level fast restore) | **YES** | `backup-image` restore mode reverses the chunk-CBT manifest — only writes blocks that differ from current dst state. Same primitive as rustback-mirror's existing torn-recovery path scales to restore direction. |
 | Mount image as virtual drive (browse without restore) | **YES** | `backup-image` + `windows::Win32::Storage::Vhd::AttachVirtualDisk`. For file-tier snapshots, separate `backup-file mount` worker via WinFsp (§6.4). |
 | Verify image integrity | **YES** | rustic_core `check` for file tier; per-chunk SHA-256 + sidecar manifest hash for image tier. |
 | AES-256 encryption at rest | **YES** | Inherited from rustic_core (file tier); separate symmetric encryption layer for VHDX image tier. |
 | Compression (configurable) | **YES** | rustic_core zstd (file tier); zstd on chunk writes in image tier. |
 | Scheduled backups | **YES** | Backup Server's job DAG (§5.2), replacing Macrium's scheduler and Windows Task Scheduler both. |
 | VSS integration | **YES** | Built into every read-path worker; not optional. §5.2/§6.0 — VSS lives in the orchestrator. |
-| WinPE / Linux rescue boot media | **YES, post-MVP — necessary for OSS credibility** | Native Boot VHDX restore covers the common case (§6.2). A WinPE-based recovery ISO is required for "C: drive is dead" scenarios and must ship by v1.0. Build target: small WinPE image with backup-server + backup-image embedded, fetches manifest from D:\ replica. |
+| WinPE / Linux rescue boot media | **YES, post-MVP — necessary for OSS credibility** | Native Boot VHDX restore covers the common case (§6.2). A WinPE-based recovery ISO is required for "C: drive is dead" scenarios and must ship by v1.0. Build target: small WinPE image with rustback-server + backup-image embedded, fetches manifest from D:\ replica. |
 | ViBoot (instantly boot image as VM for test/recovery) | **STRETCH** | VHDX is a native Hyper-V format. With Hyper-V or a free hypervisor (VirtualBox supports VHDX read since 6.0), this is mostly orchestration. Add a `backup-image vmboot` command that creates the VM definition and starts it. Not a v1.0 blocker, but the gap with Macrium narrows the demo. |
 | Image Guardian (ransomware protection for backup files) | **YES, simpler form** | Backup destination repo path is owned by a dedicated low-privilege service account; user account has read-only access. Ransomware running as the user can't damage the backup. Optional: filesystem-filter-based write protection if Windows ever exposes a sane API. |
 | Cloning (live disk-to-disk) | **STRETCH** | `backup-image --restore-target=physical-disk` covers it via the existing imaging primitives. Not a v1.0 priority but practically free given the rest of the stack. |
@@ -1220,12 +1220,12 @@ until v1.0:
 | 2026-05-14 | Window scope first; Linux/macOS deferred | Match user's actual environment, narrow v1 | Active |
 | 2026-05-14 | Apache-2.0 license preference (TBC) | Compat with kopia, common in Rust crypto ecosystem | Tentative |
 | 2026-05-14 | File-tier foundation: embed `rustic_core` at pinned release (`=0.11.x`), Cargo.lock committed, never track main | Code+architecture review confirmed quality (typestate API, streaming I/O, structured errors, library-first design, Apache/MIT no-CLA). Bus factor of 1 mitigated by restic-format compatibility (emergency exit via restic). Saves 6-18 months of reimplementation. | Settled |
-| 2026-05-17 | RustBack target = **5 executables**: `backup-server`, `rustback`, `backup-blockcopy`, `backup-filecopy`, `backup-mirror` (§5.7) | Architecture discussion, user-approved. One control plane + one UI + three workers — minimal, clear boundaries. | Settled |
-| 2026-05-17 | Workers are separate supervised **processes**; control-plane logic is **modules** in `backup-server` | Process isolation (crash/leak/hang containment), Job-Object hard-kill (no thread is killable), the as-built worker contract. Rule: data-plane → process, control-plane → module. | Settled |
-| 2026-05-17 | `backup-dump` + `backup-indexer` retired into `backup-server` as modules; workers produce data, server catalogs it | They are control-plane logic over data the server already holds; the server stays data-blind because workers (not the server) read repos. | Settled |
+| 2026-05-17 | RustBack target = **5 executables**: `rustback-server`, `rustback`, `rustback-blockcopy`, `rustback-filecopy`, `rustback-mirror` (§5.7) | Architecture discussion, user-approved. One control plane + one UI + three workers — minimal, clear boundaries. | Settled |
+| 2026-05-17 | Workers are separate supervised **processes**; control-plane logic is **modules** in `rustback-server` | Process isolation (crash/leak/hang containment), Job-Object hard-kill (no thread is killable), the as-built worker contract. Rule: data-plane → process, control-plane → module. | Settled |
+| 2026-05-17 | `rustback-dump` + `rustback-indexer` retired into `rustback-server` as modules; workers produce data, server catalogs it | They are control-plane logic over data the server already holds; the server stays data-blind because workers (not the server) read repos. | Settled |
 | 2026-05-17 | `rustback-tray.exe` retired — the tray icon folds into `rustback` | A tray needs the interactive user session; the headless Session-0 Service can't show UI; `rustback` already runs in the user session. | Settled |
-| 2026-05-17 | Renames: `backup-image`→`backup-blockcopy`, `backup-file`→`backup-filecopy` | Names should describe the action (block vs file copy), not a mechanism (VSS) or a vendored crate (`rustic`). | Settled |
-| 2026-05-17 | `backup-server` is a self-installing Windows Service, logon account `david` — **not** LocalSystem | Headless/session-independent needs Service shape; `wbadmin` DENY ACEs on `E:\` lock out SYSTEM too, and workers inherit the server token (`kopia-0dr.45`). | Settled |
+| 2026-05-17 | Renames: `backup-image`→`rustback-blockcopy`, `backup-file`→`rustback-filecopy` | Names should describe the action (block vs file copy), not a mechanism (VSS) or a vendored crate (`rustic`). | Settled |
+| 2026-05-17 | `rustback-server` is a self-installing Windows Service, logon account `david` — **not** LocalSystem | Headless/session-independent needs Service shape; `wbadmin` DENY ACEs on `E:\` lock out SYSTEM too, and workers inherit the server token (`kopia-0dr.45`). | Settled |
 | 2026-05-17 | Worker contract is structured `Event::Progress` JSONL on stderr + exit codes 0/23/1 + Job-Object kill + stall-watch — **not** the earlier REST-callback sketch | The as-built, sub-project-0-hardened contract; promoted to a shared documented `worker_contract` module (`kopia-0dr.37`). | Settled |
 | 2026-05-14 | VSS integration lives in our orchestrator, not in rustic_core | LocalSource takes a path; we hand it the shadow-copy mount root. Matches restic-the-CLI pattern. No fork needed. | Settled |
 | 2026-05-14 | NTFS ACL / ADS / reparse / sparse handling via upstream PR (opt-in `windows_metadata` field on `Metadata`) | Issue #19 is `help wanted`. Apache/MIT no CLA. Opt-in preserves restic format compat when absent. | Settled |
@@ -1245,7 +1245,7 @@ until v1.0:
 | 2026-05-15 | Backup Server install must set explicit `<Priority>5</Priority>` (Normal) on every scheduled task it manages | `kopia-8ag`: Task Scheduler default is BelowNormal, propagates to all children, silently throttles I/O 2-3× | Settled |
 | 2026-05-15 | Adopt `FSCTL_USN_TRACK_MODIFIED_RANGES` + `USN_RECORD_V4` as the primary change-detection primitive for the file-tier worker; `FSCTL_QUERY_ALLOCATED_RANGES` for sparse-file preflight; reject Hyper-V RCT | Plain NTFS, no Hyper-V dependency, byte-range granularity, documented stable APIs; turns 80-minute VHDX hash passes into minutes-proportional-to-delta. See §6.7. Closes RCT as a dead end. | Settled |
 | 2026-05-15 | Worker contract is structured JSON-over-HTTP (or named-pipe), never magic-string log parsing | `kopia-wp4`: producer/consumer separator-format drift silently broke the dashboard's replica-OK signal for 4 nights post-cutover. The new contract eliminates this class. | Settled (already implied by §5.3; explicit now) |
-| 2026-05-15 | Intra-file pipeline parallelism (rehash producer thread + main-loop consumer + bounded crossbeam channel) is the canonical pattern for any worker phase that reads two disjoint physical disks; multi-threaded hashing and cbt-mode file-level parallelism are explicitly rejected | `kopia-c90` landed this pattern in backup-mirror; the `backup-image` worker should inherit it. Multi-threaded hashing is CPU-side overkill (SHA-256 already 2.5× faster than I/O); cbt-mode file parallelism causes head thrash on spindle destinations | Settled |
+| 2026-05-15 | Intra-file pipeline parallelism (rehash producer thread + main-loop consumer + bounded crossbeam channel) is the canonical pattern for any worker phase that reads two disjoint physical disks; multi-threaded hashing and cbt-mode file-level parallelism are explicitly rejected | `kopia-c90` landed this pattern in rustback-mirror; the `backup-image` worker should inherit it. Multi-threaded hashing is CPU-side overkill (SHA-256 already 2.5× faster than I/O); cbt-mode file parallelism causes head thrash on spindle destinations | Settled |
 | 2026-05-15 | Personal-stack codebase will be frozen at `personal-v1-frozen` once it sustains 14 consecutive green nights, no open P1s, BD/priority/signing-setup all documented for fresh-host rebuild; OSS-dev branch line starts thereafter, runs parallel-eval against synthetic + replica shadow, never touches operator's data | Separates operator-data-safety from OSS-dev-stability so neither blocks the other; canonical Ship-of-Theseus pattern applied at codebase scope rather than worker scope (§7.1) | Active vision |
 | 2026-05-15 | OSS-dev v1.0 competitive target: feature and speed parity with Macrium Reflect at the imaging tier and with kopia/restic at the file tier; explicit Macrium feature matrix and speed targets recorded in §8.1 | Concretizes the §1 vision into a measurable bar; clarifies what we WILL build (imaging, CBT, mount, rescue media, encryption, ransomware-resistant repo) vs WON'T (Site Manager, PXE, differential, cloud-in-v1) | Active vision |
 | 2026-05-17 | Native replica worker VSS pattern: WMI `Win32_ShadowCopy.Create` (ClientAccessible), not `IVssBackupComponents` | `kopia-0dr.31`: app-consistency is a non-factor — writer coordination would not fix a torn VHDX from concurrent wbadmin (its output file isn't writer-protected), and the kopia repo is crash-tolerant by design. Crash-consistent suffices. WMI gives full lifecycle control vs a COM state machine; create primitive already proven (`kopia-0dr.30`). Teardown owned by `kopia-0dr.32`. | Settled |
