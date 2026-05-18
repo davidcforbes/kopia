@@ -2,8 +2,8 @@ param(
     [ValidateSet('Inline', 'Surveillance')] [string]$Mode = 'Inline',
     [string]$StateFile = 'C:\dev\kopia\cicd\.last-deploy',
     [int]$StaleHours = 24,
-    [string]$AppId = 'KopiaBackup.HealthCheck',
-    [string]$LaunchProto = 'kopiamonitor:open'
+    [string]$AppId = 'RustBack.HealthCheck',
+    [string]$LaunchProto = 'rustback:open'
 )
 
 # REQUIRES Windows PowerShell 5.1 (NOT pwsh 7+). The WinRT type-loading idiom

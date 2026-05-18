@@ -4,7 +4,7 @@
 
   <RegistrationInfo>
 
-    <Description>Daily passive surveillance of cicd/.last-deploy. Silent on fresh+green; emits Windows toast under KopiaBackup.HealthCheck on failure verdict or runs older than 24h.</Description>
+    <Description>Daily passive surveillance of cicd/.last-deploy. Silent on fresh+green; emits Windows toast under RustBack.HealthCheck on failure verdict or runs older than 24h.</Description>
 
     <URI>\Backup\KopiaCicdHealthCheck</URI>
 

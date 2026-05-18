@@ -197,17 +197,17 @@ if !SNAP2_RC! NEQ 0 set OVERALL_RC=1
 
 REM ---- Maintenance ----
 REM Upstream server runs full+quick maintenance per repo policy (epic kopia-7s7).
-REM MAINT_RC stays in the Exit codes line for backup-monitor.exe parser stability.
+REM MAINT_RC stays in the Exit codes line for rustback-monitor.exe parser stability.
 echo %DATE% %TIME% — [maintenance] handled by \Backup\KopiaServer per policy >> "%LOG%"
 set MAINT_RC=0
 
-REM ---- Index newly-created snapshots so backup-monitor's Find & Restore
+REM ---- Index newly-created snapshots so rustback's Find & Restore
 REM      page sees today's (latest-1) snapshot. Failures here are NON-fatal:
 REM      a stale search index is not a backup failure and must not flip
 REM      OVERALL_RC. wbengine.exe was already drained in preflight, so the
 REM      wbadmin VHDX target on D: is safe to read.
-set INDEXER=C:\dev\backup-monitor\target\release\backup-indexer.exe
-set INDEX_DIR=D:\BackupMonitorIndex
+set INDEXER=C:\dev\rustback\target\release\rustback-indexer.exe
+set INDEX_DIR=D:\RustBackIndex
 if exist "!INDEXER!" (
     echo %DATE% %TIME% — [indexer] kopia incremental starting >> "%LOG%"
     "!INDEXER!" --kopia --index-dir=!INDEX_DIR! >> "%LOG%" 2>&1
@@ -231,7 +231,7 @@ if exist "!INDEXER!" (
 REM ---- Snapshot list ----
 REM 'kopia content stats' was here but is direct-repository-only — the API
 REM client gets "operation supported only on direct repository". Same data
-REM is in backup-dump.exe STATUS CARDS via separate path, so dropping rather
+REM is in rustback-dump.exe STATUS CARDS via separate path, so dropping rather
 REM than guarding.
 echo %DATE% %TIME% — Snapshot list: >> "%LOG%"
 "%KOPIA_BIN%" %KOPIA_CFG% snapshot list --all >> "%LOG%" 2>&1

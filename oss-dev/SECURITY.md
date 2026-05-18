@@ -41,7 +41,7 @@ to remain anonymous.
 - `backup-server` — the control-plane orchestrator: REST API, DAG
   runner, worker subprocess supervision, config parsing, state store.
 - `backup-server-tray`, and the `--server-url` REST client modes of
-  `backup-dump` / `backup-monitor`.
+  `backup-dump` / `rustback`.
 - The future native Rust workers (`kopia-file`, `kopia-block`) once
   they ship.
 - The repository format and any encryption/secret-handling code in

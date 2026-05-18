@@ -10,7 +10,7 @@ that was retired). Push to `fork` only; never propose upstream.
 | File | Purpose |
 |---|---|
 | `setup_all.cmd` | One-time elevated setup — creates Kopia repo, registers scheduled tasks, configures wbadmin. |
-| `daily_kopia_backup.cmd` | Nightly 03:00 task — `C:\dev` and `C:\Users\david` snapshots, quick maintenance, backup-indexer. Decrypts `KOPIA_PASSWORD` from `.kopia-pw.dat` via DPAPI LocalMachine scope. |
+| `daily_kopia_backup.cmd` | Nightly 03:00 task — `C:\dev` and `C:\Users\david` snapshots, quick maintenance, rustback-indexer. Decrypts `KOPIA_PASSWORD` from `.kopia-pw.dat` via DPAPI LocalMachine scope. |
 | `verify_backups.cmd` | Weekly Saturday 04:00 task — `snapshot verify` + 5% file content sample + full maintenance. Same DPAPI password loader. |
 | `get_kopia_password.ps1` | Reads `.kopia-pw.dat` (gitignored), runs `ProtectedData.Unprotect` LocalMachine, writes plaintext to stdout. |
 | `repo_status_check.ps1` | Hard-timeout wrapper around `kopia repository status` for monitoring. |
@@ -19,7 +19,7 @@ that was retired). Push to `fork` only; never propose upstream.
 | `check_wbadmin_health.ps1` | Daily 08:30 task — parses `wbadmin get versions`, asserts newest backup is < 26h old, peeks `Microsoft-Windows-Backup` event log for failures since then. Posts toast PASS/STALE/FAIL/UNKNOWN. Writes `WBADMIN_HEALTH_FAIL.flag`. |
 | `check_backup_errors.ps1` | Older error-counting helper, retained for ad-hoc use. |
 | `kopia_errors.ps1` | On-demand drilldown when `errors=N>0`: lists per-folder error counts and unique failed paths from a snapshot log. |
-| `register_backup_monitor_toast.ps1` | One-time HKCU registration: `KopiaBackup.HealthCheck` AppId + `kopiamonitor:` URL protocol pointing at `backup-monitor.exe`. |
+| `register_rustback_toast.ps1` | One-time HKCU registration: `RustBack.HealthCheck` AppId + `rustback:` URL protocol pointing at `rustback-monitor.exe`. |
 | `create_scheduled_task.ps1` | Registers the daily 03:00 Kopia task. S4U logon + RunLevel Highest. |
 | `create_health_check_task.ps1` | Registers the daily 08:00 watchdog. Interactive logon. |
 | `create_wbadmin_health_check_task.ps1` | Registers the daily 08:30 wbadmin freshness check. Interactive logon + RunLevel Highest. |
@@ -27,7 +27,7 @@ that was retired). Push to `fork` only; never propose upstream.
 | `pre_backup_scan.ps1` | Inventory of about-to-be-backed-up state. |
 | `restore.cmd` | One-shot `kopia snapshot restore` wrapper. |
 | `setup_wbadmin.cmd` / `reset_wbadmin.cmd` | Windows Backup configuration helpers. |
-| `run_indexer_backfill.cmd` | Manually trigger a backup-indexer run outside the nightly. |
+| `run_indexer_backfill.cmd` | Manually trigger a rustback-indexer run outside the nightly. |
 | `apply-sysmon-lean.cmd` + `sysmon-lean.xml` | Sysinternals Sysmon config tuned for backup observability. |
 | `create_recovery_usb.cmd` | Build a Windows recovery USB. |
 | `watch-pool.cmd` | Tail workshare pool diagnostics during a snapshot. |
@@ -53,7 +53,7 @@ Apply restrictive ACLs (`icacls .kopia-pw.dat /inheritance:r /grant:r SYSTEM:F A
 
 ## Notification architecture
 
-Three independent toast channels, one shared `KopiaBackup.HealthCheck` AppId:
+Three independent toast channels, one shared `RustBack.HealthCheck` AppId:
 
 1. **Inline kopia toast** — fires within seconds of `daily_kopia_backup.cmd`
    finishing, via `post_summary_toast.ps1`. Reads structured `snapshot

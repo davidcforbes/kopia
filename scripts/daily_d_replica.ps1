@@ -1,6 +1,6 @@
 ﻿# daily_d_replica.ps1 -- Daily mirror of D: to the 8 TB external (E:).
 #
-# Single-tool design: VSS shadow of D:, then one backup-mirror.exe invocation
+# Single-tool design: VSS shadow of D:, then one rustback-mirror.exe invocation
 # per top-level subtree on D:. Mode is always cbt (chunk-CBT, 4 MiB chunks).
 # WindowsImageBackup uses --manifest-key basename so wbadmin's nightly
 # dated-folder rotation doesn't defeat the incremental; other subtrees use
@@ -21,11 +21,11 @@ param(
     [string]$DailyKopiaLog   = 'C:\dev\kopia\logs\daily_kopia.log',
     [string]$FlagFile        = 'C:\dev\kopia\logs\BACKUP_REPLICA_FAIL.flag',
     [string]$HeartbeatLog    = 'C:\dev\kopia\logs\heartbeat.log',
-    [string]$AppId           = 'KopiaBackup.HealthCheck',
-    [string]$LaunchProto     = 'kopiamonitor:open',
-    [string]$BackupMirrorExe = 'C:\dev\backup-monitor\target\release\backup-mirror.exe',
-    [string]$ManifestRoot    = 'C:\BackupMirror\manifests',
-    [string]$BackupMirrorLogRoot = 'C:\BackupMirror\logs',
+    [string]$AppId           = 'RustBack.HealthCheck',
+    [string]$LaunchProto     = 'rustback:open',
+    [string]$BackupMirrorExe = 'C:\dev\rustback\target\release\rustback-mirror.exe',
+    [string]$ManifestRoot    = 'C:\RustBackMirror\manifests',
+    [string]$BackupMirrorLogRoot = 'C:\RustBackMirror\logs',
     [int]$HeartbeatStaleSec  = 300,
     [int64]$HeadroomBytes    = 50GB,
     [int]$ProgressIntervalSec = 60,
@@ -90,7 +90,7 @@ function Show-Toast {
     </binding>
   </visual>
   <actions>
-    <action content="Open Backup Monitor" activationType="protocol" arguments="$launch" />
+    <action content="Open RustBack" activationType="protocol" arguments="$launch" />
   </actions>
 </toast>
 "@
@@ -328,13 +328,13 @@ try {
     # stdout. We aggregate the per-tree CBT stats into the replica summary.
     $bmExe = $BackupMirrorExe
     if (-not (Test-Path -LiteralPath $bmExe)) {
-        throw "backup-mirror.exe not found at $bmExe -- run cargo build --release in C:\dev\backup-monitor"
+        throw "rustback-mirror.exe not found at $bmExe -- run cargo build --release in C:\dev\rustback"
     }
     $bmSig = Get-AuthenticodeSignature -LiteralPath $bmExe
     if ($bmSig.Status -ne 'Valid') {
-        throw "backup-mirror.exe signature is not Valid (Status=$($bmSig.Status)) -- run signing\sign-all.ps1"
+        throw "rustback-mirror.exe signature is not Valid (Status=$($bmSig.Status)) -- run signing\sign-all.ps1"
     }
-    Write-Log "backup-mirror.exe: $bmExe (sig=$($bmSig.Status))" 'mirror'
+    Write-Log "rustback-mirror.exe: $bmExe (sig=$($bmSig.Status))" 'mirror'
 
     # Per-run log root: per-tree progress JSONL + summary log.
     $runStamp     = (Get-Date).ToString('yyyyMMdd-HHmmss')
@@ -354,13 +354,13 @@ try {
     # Sysmon subtree mid-run. Skip the whole subtree until backup-mirror
     # gains per-file-skip semantics. Sysmon is local telemetry, regenerable.
     # Excludes apply to both directories and top-level files: Recycle Bin and
-    # Volume Information are NTFS system; BackupMonitorIndex is a known
+    # Volume Information are NTFS system; RustBackIndex is a known
     # local-state dir; Sysmon is open-file transient that backup-mirror
     # can't safely mirror without per-file-skip semantics. File excludes
     # catch pagefile/swapfile/hiberfil if D: is ever configured as a paging
     # target.
     $EXCLUDE_TOP = @(
-        '$RECYCLE.BIN', 'System Volume Information', 'BackupMonitorIndex', 'Sysmon',
+        '$RECYCLE.BIN', 'System Volume Information', 'RustBackIndex', 'Sysmon',
         'pagefile.sys', 'swapfile.sys', 'hiberfil.sys', 'DumpStack.log.tmp'
     )
     $topEntries  = Get-ChildItem -LiteralPath $shadowPath -Force -ErrorAction Stop |

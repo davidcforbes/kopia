@@ -13,10 +13,10 @@ backup-automation stack that surrounds it.
 ### Rule 1 — Verification before "errors / clean / passed / failed" claims
 
 Before answering any question about backup state, **run
-`backup-dump.exe` first**:
+`rustback-dump.exe` first**:
 
 ```bash
-/c/dev/backup-monitor/target/release/backup-dump.exe
+/c/dev/rustback/target/release/rustback-dump.exe
 ```
 
 It already scores every nightly run with a STATUS CARDS verdict and a
@@ -29,7 +29,7 @@ Why this rule exists: 2026-04-29 session sampled one
 and answered "Backup logs are clean." The 4/28 nightly had actually
 returned `OVERALL_RC=1` because of one Intel telemetry file
 (`AppData/Local/Intel/SUR/QUEENCREEK/intermediate_data/u-000005.db`)
-being locked. `backup-dump.exe` already knew this.
+being locked. `rustback-dump.exe` already knew this.
 
 Binds to `superpowers:verification-before-completion`.
 
@@ -43,9 +43,9 @@ new code for the explicit gaps that remain.
 
 Why this rule exists: 2026-04-29 session shipped ~170 lines of
 `post_summary_toast.ps1` plus `check_wbadmin_health.ps1` plus a
-"simplified" `check_backup_health.ps1`, while `backup-monitor.exe`
-(three Rust binaries, a feature-rich dashboard, a `kopiamonitor:` URL
-protocol) was sitting at `C:\dev\backup-monitor\` already doing nearly
+"simplified" `check_backup_health.ps1`, while `rustback-monitor.exe`
+(three Rust binaries, a feature-rich dashboard, a `rustback:` URL
+protocol) was sitting at `C:\dev\rustback\` already doing nearly
 all of it. The pointer was inside `register_backup_monitor_toast.ps1`
 and was read but not followed.
 
@@ -86,8 +86,8 @@ WebDAV, local filesystem, etc.). It provides both a CLI and GUI
 
 This fork lives at `github.com/davidcforbes/kopia`. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md) for how it integrates with the
-surrounding Windows backup stack (`backup-monitor.exe`, scheduled
-tasks, the `kopiamonitor:` URL protocol).
+surrounding Windows backup stack (`rustback-monitor.exe`, scheduled
+tasks, the `rustback:` URL protocol).
 
 ## Build commands
 

@@ -92,7 +92,7 @@ After regen:
 
 ## Toast surveillance
 
-`cicd/toast-cicd-status.ps1` reads `cicd/.last-deploy` and emits a Windows toast under the existing `KopiaBackup.HealthCheck` AppId (clicking the toast opens `backup-monitor.exe` via the `kopiamonitor:` URL protocol). Two modes:
+`cicd/toast-cicd-status.ps1` reads `cicd/.last-deploy` and emits a Windows toast under the existing `RustBack.HealthCheck` AppId (clicking the toast opens `rustback-monitor.exe` via the `rustback:` URL protocol). Two modes:
 
 - **`-Mode Inline`** — always emits PASS or FAIL. Runs as the final step of `make release-and-deploy` so the operator gets immediate feedback that the chain completed.
 - **`-Mode Surveillance`** — silent on fresh-and-green; emits ONLY on `verdict: failure` OR `runId` older than `-StaleHours` (default 24). Used by the daily `\Backup\KopiaCicdHealthCheck` scheduled task to surface drift even when no one's actively running the pipeline.

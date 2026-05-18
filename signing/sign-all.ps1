@@ -64,18 +64,18 @@ $dlib = (Get-ChildItem "$nugetRoot\microsoft.trusted.signing.client" -Recurse -F
 if (-not $signtool) { throw 'signtool.exe not found. Run: cd signing\dlib && dotnet restore' }
 if (-not $dlib)     { throw 'Azure.CodeSigning.Dlib.dll not found. Run: cd signing\dlib && dotnet restore' }
 
-# Targets: the kopia CLI binary, every backup-monitor binary (signed
+# Targets: the kopia CLI binary, every rustback binary (signed
 # whether or not scheduled tasks use them directly -- the DR recovery
 # cache at D:\Recovery needs signed copies; kopia-2xy), and every
 # PowerShell helper used by scheduled tasks.
 $targets = @(
     'C:\Users\david\go\bin\kopia.exe',
-    'C:\dev\backup-monitor\target\release\backup-mirror.exe',
-    'C:\dev\backup-monitor\target\release\backup-monitor.exe',
-    'C:\dev\backup-monitor\target\release\backup-dump.exe',
-    'C:\dev\backup-monitor\target\release\backup-indexer.exe',
-    'C:\dev\backup-monitor\target\release\backup-server.exe',   # kopia-0dr.10
-    'C:\dev\backup-monitor\target\release\backup-server-tray.exe', # kopia-0dr.1
+    'C:\dev\rustback\target\release\rustback-mirror.exe',
+    'C:\dev\rustback\target\release\rustback-monitor.exe',
+    'C:\dev\rustback\target\release\rustback-dump.exe',
+    'C:\dev\rustback\target\release\rustback-indexer.exe',
+    'C:\dev\rustback\target\release\rustback-server.exe',   # kopia-0dr.10
+    'C:\dev\rustback\target\release\rustback-tray.exe', # kopia-0dr.1
     "$repo\scripts\repo_status_check.ps1",
     "$repo\scripts\check_backup_errors.ps1"
 )
@@ -161,8 +161,8 @@ if ($bad -gt 0) { throw "$bad file(s) have non-Valid signatures." }
 Write-Host 'All signatures valid.' -ForegroundColor Green
 
 # Refresh bare-metal recovery cache at D:\Recovery (kopia-2xy). Copies the
-# seven core .exe binaries (kopia, backup-monitor, backup-mirror, backup-dump,
-# backup-indexer, backup-server, backup-server-tray) into D:\Recovery only if
+# seven core .exe binaries (kopia, rustback-monitor, rustback-mirror, rustback-dump,
+# rustback-indexer, rustback-server, rustback-tray) into D:\Recovery only if
 # their content actually changed,
 # so successful sign-all runs that don't touch any exe are a no-op.
 # Silently skipped if D:\Recovery doesn't exist (clean-host or DR not yet

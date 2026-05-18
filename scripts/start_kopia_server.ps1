@@ -49,7 +49,7 @@ $env:KOPIA_PASSWORD = $repoPw
 # Restart-on-failure setting handles unexpected exits.
 #
 # --heartbeat-* (epic kopia-bcp): predictable proof-of-life signal every 60s.
-# Downstream stall guards (wrapper, watchdog, backup-monitor.exe) consume the
+# Downstream stall guards (wrapper, watchdog, rustback-monitor.exe) consume the
 # heartbeat-line freshness in C:\dev\kopia\logs\heartbeat.log.
 & $KopiaBin server start `
     --address=$Address `

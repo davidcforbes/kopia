@@ -21,8 +21,8 @@ param(
     [string]$LogFile         = 'C:\dev\kopia\logs\weekly_replica_verify.log',
     [string]$DailyKopiaLog   = 'C:\dev\kopia\logs\daily_kopia.log',
     [string]$FlagFile        = 'C:\dev\kopia\logs\BACKUP_REPLICA_VERIFY_FAIL.flag',
-    [string]$AppId           = 'KopiaBackup.HealthCheck',
-    [string]$LaunchProto     = 'kopiamonitor:open',
+    [string]$AppId           = 'RustBack.HealthCheck',
+    [string]$LaunchProto     = 'rustback:open',
     [double]$DownloadPercent = 1.0,
     [int]$Parallel           = 4,
     [switch]$DryRun
@@ -80,7 +80,7 @@ function Show-Toast {
     </binding>
   </visual>
   <actions>
-    <action content="Open Backup Monitor" activationType="protocol" arguments="$launch" />
+    <action content="Open RustBack" activationType="protocol" arguments="$launch" />
   </actions>
 </toast>
 "@

@@ -1,18 +1,18 @@
-﻿# Register backup-monitor.exe as the toast click target.
+﻿# Register rustback-monitor.exe as the toast click target.
 #
 # Two pieces:
-#   1. HKCU AppUserModelID entry -- gives toasts a proper "Backup Monitor"
+#   1. HKCU AppUserModelID entry -- gives toasts a proper "RustBack"
 #      source name (and icon) instead of "Windows PowerShell".
-#   2. `kopiamonitor:` URL protocol handler pointing at backup-monitor.exe --
+#   2. `rustback:` URL protocol handler pointing at rustback-monitor.exe --
 #      lets toast launch/action attributes use activationType="protocol".
 #
 # Both are HKCU-only; no admin rights required. Re-running is idempotent.
 
 param(
-    [string]$AppId       = 'KopiaBackup.HealthCheck',
-    [string]$DisplayName = 'Backup Monitor',
-    [string]$ExePath     = 'C:\dev\backup-monitor\target\release\backup-monitor.exe',
-    [string]$Protocol    = 'kopiamonitor'
+    [string]$AppId       = 'RustBack.HealthCheck',
+    [string]$DisplayName = 'RustBack',
+    [string]$ExePath     = 'C:\dev\rustback\target\release\rustback-monitor.exe',
+    [string]$Protocol    = 'rustback'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,7 +29,7 @@ Set-ItemProperty -Path $aumidPath -Name 'IconUri'     -Value $ExePath     -Type 
 # ShowInSettings = 1 lets users tune the notification under Settings -> Notifications.
 Set-ItemProperty -Path $aumidPath -Name 'ShowInSettings' -Value 1 -Type DWord
 
-# 2. URL protocol handler -- `kopiamonitor:` launches backup-monitor.exe.
+# 2. URL protocol handler -- `rustback:` launches rustback-monitor.exe.
 $protoPath = "HKCU:\Software\Classes\$Protocol"
 if (-not (Test-Path $protoPath)) { New-Item -Path $protoPath -Force | Out-Null }
 Set-ItemProperty -Path $protoPath -Name '(default)'   -Value "URL:$DisplayName" -Type String
@@ -37,7 +37,7 @@ Set-ItemProperty -Path $protoPath -Name 'URL Protocol' -Value '' -Type String
 
 $cmdPath = "$protoPath\shell\open\command"
 if (-not (Test-Path $cmdPath)) { New-Item -Path $cmdPath -Force | Out-Null }
-# %1 receives the full URL ("kopiamonitor:open" etc.) -- backup-monitor.exe can ignore it.
+# %1 receives the full URL ("rustback:open" etc.) -- rustback-monitor.exe can ignore it.
 Set-ItemProperty -Path $cmdPath -Name '(default)' -Value "`"$ExePath`" `"%1`"" -Type String
 
 Write-Output "Registered AppId        : $AppId  -> $DisplayName"

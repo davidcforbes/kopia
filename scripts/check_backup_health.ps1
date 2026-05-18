@@ -1,12 +1,12 @@
 ﻿# check_backup_health.ps1 -- Parse the latest daily_kopia backup run and emit a
-# Windows toast notification (PASS/FAIL) under the KopiaBackup.HealthCheck AUMID.
+# Windows toast notification (PASS/FAIL) under the RustBack.HealthCheck AUMID.
 #
 # Scheduled daily at 08:00 by \Backup\KopiaBackupHealthCheck.
 [CmdletBinding()]
 param(
     [string]$LogFile      = 'C:\dev\kopia\logs\daily_kopia.log',
     [string]$HeartbeatLog = 'C:\dev\kopia\logs\heartbeat.log',
-    [string]$Aumid        = 'KopiaBackup.HealthCheck',
+    [string]$Aumid        = 'RustBack.HealthCheck',
     # Treat the run as stale (FAIL) if newer than this many hours hasn't completed.
     [int]$StaleHours          = 30,
     # Treat an in-progress run as STALL (FAIL) if heartbeat-line is older

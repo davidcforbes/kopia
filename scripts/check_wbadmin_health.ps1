@@ -11,8 +11,8 @@
 
 param(
     [string]$FlagFile    = 'C:\dev\kopia\logs\WBADMIN_HEALTH_FAIL.flag',
-    [string]$AppId       = 'KopiaBackup.HealthCheck',
-    [string]$LaunchProto = 'kopiamonitor:open',
+    [string]$AppId       = 'RustBack.HealthCheck',
+    [string]$LaunchProto = 'rustback:open',
     [int]   $FreshHours  = 26,
     [int]   $StaleHours  = 72
 )
@@ -43,7 +43,7 @@ function Show-Toast {
     </binding>
   </visual>
   <actions>
-    <action content="Open Backup Monitor" activationType="protocol" arguments="$launch" />
+    <action content="Open RustBack" activationType="protocol" arguments="$launch" />
   </actions>
 </toast>
 "@

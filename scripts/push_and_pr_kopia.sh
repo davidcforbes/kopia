@@ -312,5 +312,5 @@ echo "Open PRs filed against $UPSTREAM_REPO. Review and add labels/reviewers"
 echo "via the GitHub UI as needed."
 echo
 echo "Remaining manual steps:"
-echo "  - Bitdefender exclusion for C:/dev/backup-monitor/target/ (kopia-fuo)"
+echo "  - Bitdefender exclusion for C:/dev/rustback/target/ (kopia-fuo)"
 echo "  - Watch CI on each PR; address feedback"

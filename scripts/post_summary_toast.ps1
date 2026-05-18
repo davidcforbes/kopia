@@ -15,8 +15,8 @@
 param(
     [string]$LogFile     = 'C:\dev\kopia\logs\daily_kopia.log',
     [string]$FlagFile    = 'C:\dev\kopia\logs\BACKUP_ERRORS.flag',
-    [string]$AppId       = 'KopiaBackup.HealthCheck',
-    [string]$LaunchProto = 'kopiamonitor:open'
+    [string]$AppId       = 'RustBack.HealthCheck',
+    [string]$LaunchProto = 'rustback:open'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,7 +45,7 @@ function Show-Toast {
     </binding>
   </visual>
   <actions>
-    <action content="Open Backup Monitor" activationType="protocol" arguments="$launch" />
+    <action content="Open RustBack" activationType="protocol" arguments="$launch" />
   </actions>
 </toast>
 "@

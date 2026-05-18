@@ -1,7 +1,7 @@
 # Backup Server — fresh-host setup
 
 Bootstrap guide for bringing up the Backup Server control plane
-(`backup-server.exe`, epic `kopia-0dr`) on a new Windows host. This is
+(`rustback-server.exe`, epic `kopia-0dr`) on a new Windows host. This is
 the `oss-dev` branch's setup doc; see [`../ARCHITECTURE.md`](../ARCHITECTURE.md)
 for the full component inventory and
 [`../architecture-vision.md`](../architecture-vision.md) §3.1 for the
@@ -15,7 +15,7 @@ milestone log of what has shipped.
 
 ## 1. `jobs.toml` — the config
 
-The server reads one TOML file (default `C:\BackupServer\jobs.toml`,
+The server reads one TOML file (default `C:RustBack\jobs.toml`,
 override with `--config`). It declares the server's listen address,
 state locations, and the job DAG.
 
@@ -45,7 +45,7 @@ toast       = "never"
 Validate without starting the listener:
 
 ```
-backup-server.exe --config C:\BackupServer\jobs.toml --check
+rustback-server.exe --config C:RustBack\jobs.toml --check
 ```
 
 `--check` parses the file, runs DAG validation (no cycles, no
@@ -53,21 +53,21 @@ duplicate names, no unknown `depends_on`), and exits.
 
 ---
 
-## 2. BackupServerWaker scheduled tasks
+## 2. RustBackWaker scheduled tasks
 
 The server is not a long-running service in Phase 1.3 — it is woken
 per job. One scheduled task per job invokes
 `backup-server --run-once --job <name>`. The XMLs live in
 [`../scripts/scheduled-tasks/`](../scripts/scheduled-tasks/)
-(`BackupServerWaker-*.xml`).
+(`RustBackWaker-*.xml`).
 
 Register them (elevated PowerShell):
 
 ```powershell
 $base = "C:\dev\kopia\scripts\scheduled-tasks"
 foreach ($x in "Replica","Kopia","WeeklyReplicaVerify","WeeklyBackupVerify") {
-    Register-ScheduledTask -Xml (Get-Content "$base\BackupServerWaker-$x.xml" -Raw) `
-        -TaskName "BackupServerWaker-$x" -TaskPath "\Backup\" -Force
+    Register-ScheduledTask -Xml (Get-Content "$base\RustBackWaker-$x.xml" -Raw) `
+        -TaskName "RustBackWaker-$x" -TaskPath "\Backup\" -Force
 }
 ```
 
@@ -106,7 +106,7 @@ machine can decrypt it.
 
 ## 4. Signing pipeline pre-flight
 
-`backup-server.exe`, `backup-server-tray.exe`, and the other Rust
+`rustback-server.exe`, `rustback-tray.exe`, and the other Rust
 binaries must be Authenticode-signed before the nightly preflight
 will run them — an unsigned binary FATAL-fails the preflight check.
 After any `cargo build --release`, re-sign:
@@ -117,8 +117,8 @@ pwsh C:\dev\kopia\signing\sign-all.ps1
 
 `sign-all.ps1` signs every produced `.exe`/`.ps1` and refreshes the
 `D:\Recovery` cache. If signing reports a file is locked, the most
-common cause is a running instance — stop `backup-server.exe` /
-`backup-server-tray.exe` and the dashboard, then retry (see
+common cause is a running instance — stop `rustback-server.exe` /
+`rustback-tray.exe` and the dashboard, then retry (see
 `kopia-tpl`).
 
 ---
@@ -170,7 +170,7 @@ migrations. (kopia-0dr.7)
 To watch the server live:
 
 ```
-backup-server-tray.exe                 # tray icon, polls /api/status
-backup-dump.exe --server-url            # STATUS CARDS from the REST API
-backup-monitor.exe --server-url         # full dashboard, server-sourced
+rustback-tray.exe                 # tray icon, polls /api/status
+rustback-dump.exe --server-url            # STATUS CARDS from the REST API
+rustback-monitor.exe --server-url         # full dashboard, server-sourced
 ```

@@ -1,8 +1,8 @@
 @echo off
 REM ============================================================
 REM  One-shot: backfill all historical kopia snapshots + wbadmin
-REM  backup sets into D:\BackupMonitorIndex.
-REM  Run this once after deploying backup-indexer. Nightly
+REM  backup sets into D:\RustBackIndex.
+REM  Run this once after deploying rustback-indexer. Nightly
 REM  daily_kopia_backup.cmd handles incremental updates after that.
 REM  Must run ELEVATED so the wbadmin VHDX mount succeeds.
 REM ============================================================
@@ -16,7 +16,7 @@ if "%KOPIA_PASSWORD%"=="" (
     exit /b 2
 )
 
-set INDEXER=C:\dev\backup-monitor\target\release\backup-indexer.exe
+set INDEXER=C:\dev\rustback\target\release\rustback-indexer.exe
 
 if not exist "%INDEXER%" (
     echo ERROR: indexer not built at %INDEXER%
@@ -24,17 +24,17 @@ if not exist "%INDEXER%" (
 )
 
 echo Backfilling kopia snapshots (this takes several minutes)...
-"%INDEXER%" --kopia --backfill --index-dir=D:\BackupMonitorIndex
+"%INDEXER%" --kopia --backfill --index-dir=D:\RustBackIndex
 
 echo.
 echo Backfilling wbadmin backup sets (requires admin)...
-"%INDEXER%" --wbadmin --backfill --index-dir=D:\BackupMonitorIndex
+"%INDEXER%" --wbadmin --backfill --index-dir=D:\RustBackIndex
 
 echo.
 echo Pruning orphaned indexes...
-"%INDEXER%" --prune --index-dir=D:\BackupMonitorIndex
+"%INDEXER%" --prune --index-dir=D:\RustBackIndex
 
 echo.
-echo Done. Index files are in D:\BackupMonitorIndex
+echo Done. Index files are in D:\RustBackIndex
 
 endlocal
