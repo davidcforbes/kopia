@@ -24,9 +24,9 @@ Minimal template:
 ```toml
 [server]
 http_listen    = "127.0.0.1:51516"          # loopback only — see §6
-state_dir      = "C:\\BackupServer\\state"
-event_log      = "C:\\BackupServer\\state\\events.jsonl"
-heartbeat_file = "C:\\BackupServer\\state\\heartbeat.txt"
+state_dir      = "C:\\RustBack\\state"
+event_log      = "C:\\RustBack\\state\\events.jsonl"
+heartbeat_file = "C:\\RustBack\\state\\heartbeat.txt"
 
 [[job]]
 name       = "kopia_snapshot"
