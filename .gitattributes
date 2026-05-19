@@ -2,3 +2,9 @@
 go.mod	text eol=lf whitespace=trailing-space,space-before-tab,indent-with-non-tab
 go.sum	text eol=lf whitespace=trailing-space,space-before-tab,indent-with-non-tab
 Makefile text eol=lf whitespace=trailing-space,space-before-tab,indent-with-non-tab
+
+# Windows scripts: pin the working tree to CRLF so git checkout/switch never
+# flips line endings (kopia-rg3). Signed .ps1 carry Authenticode signatures
+# over their exact bytes; a non-deterministic eol invalidates them.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
