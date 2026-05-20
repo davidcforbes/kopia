@@ -13,23 +13,38 @@ backup-automation stack that surrounds it.
 ### Rule 1 — Verification before "errors / clean / passed / failed" claims
 
 Before answering any question about backup state, **run
-`rustback-dump.exe` first**:
+`rustback-server status` first**:
 
 ```bash
-/c/dev/rustback/target/release/rustback-dump.exe
+/c/dev/rustback/target/release/rustback-server.exe status
 ```
 
-It already scores every nightly run with a STATUS CARDS verdict and a
-30-row history. Reconcile its verdict against any log sample you take.
-**If they disagree, report both and the disagreement.** Do not pick a
-winner.
+It hits the resident rustback-server REST API (loopback,
+127.0.0.1:51516) and prints a STATUS CARDS verdict: server
+uptime, latest run per job, and a 30-row recent-runs table.
+Reconcile its verdict against any log sample you take. **If
+they disagree, report both and the disagreement.** Do not pick
+a winner.
+
+The command requires the rustback-server Windows Service to be
+running (kopia-0dr.45 made it self-installing; it auto-starts
+on boot and auto-restarts on crash). If the service is down the
+command exits non-zero with a clear error — start it via
+`sc start rustback-server` before retrying. There is no
+log-parse fallback; the daemon is the authoritative state owner
+(architecture-vision Lesson 4.2).
+
+This rule replaces the legacy `rustback-dump.exe` invocation
+(kopia-0dr.43 retired that binary 2026-05-20; its REST-client
+verdict logic moved verbatim into the server crate's status
+module).
 
 Why this rule exists: 2026-04-29 session sampled one
 `cli-logs\*-snapshot-create.0.log`, found no `errors":[1-9]` matches,
 and answered "Backup logs are clean." The 4/28 nightly had actually
 returned `OVERALL_RC=1` because of one Intel telemetry file
 (`AppData/Local/Intel/SUR/QUEENCREEK/intermediate_data/u-000005.db`)
-being locked. `rustback-dump.exe` already knew this.
+being locked. The STATUS CARDS verdict already knew this.
 
 Binds to `superpowers:verification-before-completion`.
 
