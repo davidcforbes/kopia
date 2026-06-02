@@ -70,12 +70,18 @@ if (-not $dlib)     { throw 'Azure.CodeSigning.Dlib.dll not found. Run: cd signi
 # PowerShell helper used by scheduled tasks.
 $targets = @(
     'C:\Users\david\go\bin\kopia.exe',
-    'C:\dev\rustback\target\release\rustback-mirror.exe',
-    'C:\dev\rustback\target\release\rustback-monitor.exe',
-    'C:\dev\rustback\target\release\rustback-dump.exe',
-    'C:\dev\rustback\target\release\rustback-indexer.exe',
-    'C:\dev\rustback\target\release\rustback-server.exe',   # kopia-0dr.10
-    'C:\dev\rustback\target\release\rustback-tray.exe', # kopia-0dr.1
+    # Current rustback lineup (2026-05-20). Renamed backup-* -> rustback-*;
+    # rustback-dump retired (kopia-0dr.43), rustback-indexer retired
+    # (kopia-0dr.42), rustback-tray folded into monitor (kopia-0dr.44);
+    # rustback-filecopy/-blockcopy/-verify added (kopia-0dr.38/.39/.40);
+    # rustback-changeset added (kopia-oei6 — changeset source-of-truth stage).
+    'C:\dev\rustback\target\release\rustback-server.exe',    # kopia-0dr.10/.45 (service)
+    'C:\dev\rustback\target\release\rustback-monitor.exe',   # GUI + tray (kopia-0dr.44)
+    'C:\dev\rustback\target\release\rustback-mirror.exe',    # replica worker
+    'C:\dev\rustback\target\release\rustback-filecopy.exe',  # file-tier worker (kopia-0dr.39)
+    'C:\dev\rustback\target\release\rustback-blockcopy.exe', # block-image worker (kopia-0dr.40)
+    'C:\dev\rustback\target\release\rustback-verify.exe',    # verify worker (kopia-0dr.38)
+    'C:\dev\rustback\target\release\rustback-changeset.exe', # changeset source-of-truth stage (kopia-oei6)
     "$repo\scripts\repo_status_check.ps1",
     "$repo\scripts\check_backup_errors.ps1"
 )
@@ -161,8 +167,8 @@ if ($bad -gt 0) { throw "$bad file(s) have non-Valid signatures." }
 Write-Host 'All signatures valid.' -ForegroundColor Green
 
 # Refresh bare-metal recovery cache at D:\Recovery (kopia-2xy). Copies the
-# seven core .exe binaries (kopia, rustback-monitor, rustback-mirror, rustback-dump,
-# rustback-indexer, rustback-server, rustback-tray) into D:\Recovery only if
+# seven core .exe binaries (kopia + the six rustback binaries: server,
+# monitor, mirror, filecopy, blockcopy, verify) into D:\Recovery only if
 # their content actually changed,
 # so successful sign-all runs that don't touch any exe are a no-op.
 # Silently skipped if D:\Recovery doesn't exist (clean-host or DR not yet
